@@ -25,6 +25,8 @@ cargo add russx
 In any Rust file inside your crate, add the following:
 
 ```rust
+use russx::Template;
+
 russx::templates! {
     pub fn hello<'a>(name: &'a str) {
         <p>Hello, {name}!</p>
