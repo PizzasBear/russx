@@ -2009,6 +2009,158 @@ impl ToTokens for ItemTmpl {
         };
         let (impl_into_generics, _, into_where_clause) = into_generics.split_for_impl();
 
+        #[cfg(not(feature = "axum"))]
+        let axum_impl = TokenStream::new();
+
+        #[cfg(feature = "axum")]
+        let axum_impl = quote! {
+            impl #impl_generics #crate_path::__axum::IntoResponse for Props #ty_generics
+            #where_clause
+            {
+                fn into_response(self) -> #crate_path::__axum::Response {
+                    #crate_path::__axum::into_response(self)
+                }
+            }
+        };
+
+        #[cfg(not(feature = "actix-web"))]
+        let actix_web_impl = TokenStream::new();
+
+        #[cfg(feature = "actix-web")]
+        let actix_web_impl = quote! {
+            impl #impl_generics #crate_path::__actix_web::Responder for Props #ty_generics
+            #where_clause
+            {
+                type Body = #crate_path::__actix_web::BoxBody;
+
+                fn respond_to(
+                    self,
+                    _req: &#crate_path::__actix_web::HttpRequest,
+                ) -> #crate_path::__actix_web::HttpResponse {
+                    #crate_path::__actix_web::respond_to(self)
+                }
+            }
+        };
+
+        #[cfg(not(feature = "hyper"))]
+        let hyper_impl = TokenStream::new();
+
+        #[cfg(feature = "hyper")]
+        let hyper_impl = quote! {
+            impl #impl_generics ::core::convert::Into<#crate_path::__hyper::Response>
+            for Props #ty_generics
+            #where_clause
+            {
+                fn into(self) -> #crate_path::__hyper::Response {
+                    #crate_path::__hyper::respond(self)
+                }
+            }
+
+            impl #impl_generics ::core::convert::TryInto<#crate_path::__hyper::Body>
+            for Props #ty_generics
+            #where_clause
+            {
+                type Error = ::core::fmt::Error;
+                fn try_into(self) -> Result<#crate_path::__hyper::Body, Self::Error> {
+                    #crate_path::Template::render(self)
+                        .map(::core::convert::Into::into)
+                }
+            }
+        };
+
+        #[cfg(not(feature = "warp"))]
+        let warp_impl = TokenStream::new();
+
+        #[cfg(feature = "warp")]
+        let warp_impl = quote! {
+            impl #impl_generics #crate_path::__warp::Reply for Props #ty_generics
+            #where_clause
+            {
+                fn into_response(self) -> #crate_path::__warp::Response {
+                    #crate_path::__warp::reply(self)
+                }
+            }
+        };
+
+        #[cfg(not(feature = "tide"))]
+        let tide_impl = TokenStream::new();
+
+        #[cfg(feature = "tide")]
+        let tide_impl = quote! {
+            impl #impl_generics ::core::convert::TryInto<#crate_path::__tide::Body>
+            for Props #ty_generics
+            #where_clause
+            {
+                type Error = ::core::fmt::Error;
+                fn try_into(self) -> Result<#crate_path::__tide::Body, Self::Error> {
+                    #crate_path::__tide::try_into_body(self)
+                }
+            }
+
+            impl #impl_generics ::core::convert::Into<#crate_path::__tide::Response>
+            for Props #ty_generics
+            #where_clause
+            {
+                fn into(self) -> #crate_path::__tide::Response {
+                    #crate_path::__tide::into_response(self)
+                }
+            }
+        };
+
+        #[cfg(not(feature = "gotham"))]
+        let gotham_impl = TokenStream::new();
+
+        #[cfg(feature = "gotham")]
+        let gotham_impl = quote! {
+            impl #impl_generics #crate_path::__gotham::IntoResponse for Props #ty_generics
+            #where_clause
+            {
+                fn into_response(
+                    self,
+                    _state: &#crate_path::__gotham::State,
+                ) -> #crate_path::__gotham::Response {
+                    #crate_path::__gotham::respond(self)
+                }
+            }
+        };
+
+        #[cfg(not(feature = "rocket"))]
+        let rocket_impl = TokenStream::new();
+
+        #[cfg(feature = "rocket")]
+        let rocket_impl = {
+            let into_generics = syn::Generics {
+                lt_token: generics
+                    .lt_token
+                    .clone()
+                    .or_else(|| Some(parse_quote! { < })),
+                params: {
+                    let params = &generics.params;
+                    parse_quote! { '__r, '__o: '__r, #params }
+                },
+                gt_token: generics
+                    .gt_token
+                    .clone()
+                    .or_else(|| Some(parse_quote! { > })),
+                where_clause: None,
+            };
+            let (impl_into_generics, _, _) = into_generics.split_for_impl();
+
+            quote! {
+                impl #impl_into_generics #crate_path::__rocket::Responder<'__r, '__o>
+                for Props #ty_generics
+                #where_clause
+                {
+                    fn respond_to(
+                        self,
+                        _req: &'__r #crate_path::__rocket::Request<'_>,
+                    ) -> #crate_path::__rocket::Result<'__o> {
+                        #crate_path::__rocket::respond(self)
+                    }
+                }
+            }
+        };
+
         tokens.append_all(quote! {
             #(#attrs)*
             #vis mod #ident {
@@ -2046,7 +2198,8 @@ impl ToTokens for ItemTmpl {
                     }
                 }
 
-                impl #impl_into_generics Into<#crate_path::TemplateFn<'__self>> for Props #ty_generics
+                impl #impl_into_generics ::core::convert::Into<#crate_path::TemplateFn<'__self>>
+                for Props #ty_generics
                 #into_where_clause
                 {
                     fn into(self) -> #crate_path::TemplateFn<'__self> {
@@ -2055,6 +2208,14 @@ impl ToTokens for ItemTmpl {
                         })
                     }
                 }
+
+                #axum_impl
+                #actix_web_impl
+                #hyper_impl
+                #warp_impl
+                #tide_impl
+                #gotham_impl
+                #rocket_impl
             }
             #(#attrs)*
             #vis fn #ident #generics (#(#fn_inputs),*) -> #ident::Props #ty_generics #where_clause {

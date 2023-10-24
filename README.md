@@ -7,12 +7,13 @@ Russx implements a template rendering engine based on [rstml](https://github.com
 It generates Rust code from your templates at compile time using a macro.
 This crate is inpired by both [Askama](https://github.com/djc/askama) and [Leptos](https://github.com/leptos-rs/leptos).
 
-## Supported in templates
+## Features
 
 - Template instantiation
 - For loops, if-else statements, if-let statements, match statements
 - Full rust variables
 - Opt-out HTML escaping
+- Optional built-in support for Actix-Web, Axum, Gotham, Rocket, Tide, and warp web frameworks.
 
 ## How to get started
 

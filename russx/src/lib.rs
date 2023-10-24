@@ -9,58 +9,11 @@
 use std::{fmt, io};
 
 pub use russx_macros::{templates, tmpl};
-#[doc(hidden)]
-pub use typed_builder as __typed_builder;
 
-// mod seal {
-//     pub trait InterpolateSeal {}
-// }
-//
-// pub trait Interpolate: seal::InterpolateSeal {
-//     fn interpolate(&self, writer: &mut (impl fmt::Write + ?Sized)) -> fmt::Result;
-// }
-//
-// impl seal::InterpolateSeal for () {}
-// impl Interpolate for () {
-//     fn interpolate(&self, _writer: &mut (impl fmt::Write + ?Sized)) -> fmt::Result {
-//         Ok(())
-//     }
-// }
-//
-// #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-// pub struct Trust<T>(pub T);
-// impl<T: fmt::Display> seal::InterpolateSeal for Trust<T> {}
-// impl<T: fmt::Display> Interpolate for Trust<T> {
-//     fn interpolate(&self, writer: &mut (impl fmt::Write + ?Sized)) -> fmt::Result {
-//         write!(writer, "{}", self.0)
-//     }
-// }
-//
-// impl<T: fmt::Display> seal::InterpolateSeal for &'_ T {}
-// impl<T: fmt::Display> Interpolate for &'_ T {
-//     fn interpolate(&self, writer: &mut (impl fmt::Write + ?Sized)) -> fmt::Result {
-//         pub struct EscapeWriter<'a, W: fmt::Write + ?Sized>(&'a mut W);
-//
-//         impl<W: fmt::Write + ?Sized> fmt::Write for EscapeWriter<'_, W> {
-//             #[inline]
-//             fn write_str(&mut self, s: &str) -> fmt::Result {
-//                 use askama_escape::Escaper;
-//
-//                 askama_escape::Html.write_escaped(&mut *self.0, s)
-//             }
-//         }
-//
-//         use fmt::Write;
-//         write!(EscapeWriter(writer), "{self}")
-//     }
-// }
-//
-// pub fn interpolate(
-//     writer: &mut (impl fmt::Write + ?Sized),
-//     value: &impl Interpolate,
-// ) -> fmt::Result {
-//     value.interpolate(writer)
-// }
+#[doc(hidden)]
+pub mod __typed_builder {
+    pub use typed_builder::*;
+}
 
 #[doc(hidden)]
 /// Writes html-escaped `value` into `writer`.
@@ -167,7 +120,7 @@ pub trait Template: Sized {
 /// This is the type of `<prop _ />` and `children` when instantiating a static template.
 pub struct TemplateFn<'a> {
     size_hint: usize,
-    render_into: Box<dyn 'a + FnOnce(&mut dyn fmt::Write) -> fmt::Result>,
+    render_into: Box<dyn FnOnce(&mut dyn fmt::Write) -> fmt::Result + Send + 'a>,
 }
 
 impl<'a> Default for TemplateFn<'a> {
@@ -183,7 +136,7 @@ impl<'a> TemplateFn<'a> {
     /// function (see `Template::render_into`).
     pub fn new(
         size_hint: usize,
-        render_into: impl 'a + FnOnce(&mut dyn fmt::Write) -> fmt::Result,
+        render_into: impl FnOnce(&mut dyn fmt::Write) -> fmt::Result + Send + 'a,
     ) -> Self {
         Self {
             size_hint,
@@ -193,7 +146,7 @@ impl<'a> TemplateFn<'a> {
 
     /// Converts a template into `TemplateFn`, this cannot be done through the `Into` trait since
     /// `TemplateFn` also implements `Template`.
-    pub fn from_template<T: Template + 'a>(template: T) -> Self {
+    pub fn from_template<T: Template + Send + 'a>(template: T) -> Self {
         Self::new(template.size_hint(), |writer| template.render_into(writer))
     }
 }
@@ -219,5 +172,271 @@ impl fmt::Debug for TemplateFn<'_> {
             .field("size_hint", &self.size_hint)
             .field("render_into", &RenderInto)
             .finish()
+    }
+}
+
+const HTML_MIME_TYPE: &str = "text/html";
+
+#[doc(hidden)]
+#[cfg(feature = "axum")]
+pub mod __axum {
+    pub use axum_core::response::{IntoResponse, Response};
+    use http::{header, HeaderValue, StatusCode};
+
+    use super::*;
+
+    pub fn into_response<T: Template>(t: T) -> Response {
+        match t.render() {
+            Ok(body) => IntoResponse::into_response((
+                [(
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static(HTML_MIME_TYPE),
+                )],
+                body,
+            )),
+            Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        }
+    }
+
+    impl<'a> IntoResponse for TemplateFn<'a> {
+        fn into_response(self) -> Response {
+            into_response(self)
+        }
+    }
+}
+
+#[doc(hidden)]
+#[cfg(feature = "actix-web")]
+pub mod __actix_web {
+    pub use actix_web::{body::BoxBody, HttpRequest, HttpResponse, Responder};
+    use actix_web::{
+        http::{header::HeaderValue, StatusCode},
+        HttpResponseBuilder, ResponseError,
+    };
+
+    use super::*;
+
+    struct ErrorAdapter(fmt::Error);
+
+    impl fmt::Debug for ErrorAdapter {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            fmt::Debug::fmt(&self.0, f)
+        }
+    }
+
+    impl fmt::Display for ErrorAdapter {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            fmt::Display::fmt(&self.0, f)
+        }
+    }
+
+    impl ResponseError for ErrorAdapter {}
+
+    pub fn respond_to<T: Template>(t: T) -> HttpResponse {
+        match t.render() {
+            Ok(body) => HttpResponseBuilder::new(StatusCode::OK)
+                .content_type(HeaderValue::from_static(HTML_MIME_TYPE))
+                .body(body),
+            Err(err) => HttpResponse::from_error(ErrorAdapter(err)),
+        }
+    }
+
+    impl<'a> Responder for TemplateFn<'a> {
+        type Body = BoxBody;
+
+        fn respond_to(self, _req: &HttpRequest) -> HttpResponse {
+            respond_to(self)
+        }
+    }
+}
+
+#[doc(hidden)]
+#[cfg(feature = "hyper")]
+pub mod __hyper {
+    pub use hyper::Body;
+    use hyper::{
+        header::{self, HeaderValue},
+        StatusCode,
+    };
+
+    use super::*;
+
+    pub type Response<B = Body> = hyper::Response<B>;
+
+    fn try_respond<T: Template>(t: T) -> Result<Response, fmt::Error> {
+        Ok(Response::builder()
+            .status(StatusCode::OK)
+            .header(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static(HTML_MIME_TYPE),
+            )
+            .body(t.render()?.into())
+            .unwrap())
+    }
+
+    pub fn respond<T: Template>(t: T) -> Response {
+        try_respond(t).unwrap_or_else(|_| {
+            Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(Body::empty())
+                .unwrap()
+        })
+    }
+
+    impl<'a> Into<Response> for TemplateFn<'a> {
+        fn into(self) -> Response {
+            respond(self)
+        }
+    }
+
+    impl<'a> TryInto<Body> for TemplateFn<'a> {
+        type Error = fmt::Error;
+        fn try_into(self) -> Result<Body, Self::Error> {
+            self.render().map(Into::into)
+        }
+    }
+}
+
+#[doc(hidden)]
+#[cfg(feature = "warp")]
+pub mod __warp {
+    pub use warp::reply::{Reply, Response};
+    use warp::{
+        http::{self, header, StatusCode},
+        hyper::Body,
+    };
+
+    use super::*;
+
+    pub fn reply<T: Template>(t: T) -> Response {
+        match t.render() {
+            Ok(body) => http::Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, HTML_MIME_TYPE)
+                .body(body.into()),
+            Err(_) => http::Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(Body::empty()),
+        }
+        .unwrap()
+    }
+
+    impl<'a> Reply for TemplateFn<'a> {
+        fn into_response(self) -> Response {
+            reply(self)
+        }
+    }
+}
+
+#[doc(hidden)]
+#[cfg(feature = "tide")]
+pub mod __tide {
+    pub use tide::{Body, Response};
+
+    use super::*;
+
+    pub fn try_into_body<T: Template>(t: T) -> Result<Body, fmt::Error> {
+        let mut body = Body::from_string(t.render()?);
+        body.set_mime(HTML_MIME_TYPE);
+        Ok(body)
+    }
+
+    pub fn into_response<T: Template>(t: T) -> Response {
+        match try_into_body(t) {
+            Ok(body) => {
+                let mut response = Response::new(200);
+                response.set_body(body);
+                response
+            }
+
+            Err(error) => {
+                let mut response = Response::new(500);
+                response.set_error(error);
+                response
+            }
+        }
+    }
+
+    impl<'a> TryInto<Body> for TemplateFn<'a> {
+        type Error = fmt::Error;
+
+        fn try_into(self) -> Result<Body, Self::Error> {
+            try_into_body(self)
+        }
+    }
+
+    impl<'a> Into<Response> for TemplateFn<'a> {
+        fn into(self) -> Response {
+            into_response(self)
+        }
+    }
+}
+
+#[doc(hidden)]
+#[cfg(feature = "gotham")]
+pub mod __gotham {
+    use gotham::hyper::{
+        self,
+        header::{self, HeaderValue},
+        StatusCode,
+    };
+    pub use gotham::{handler::IntoResponse, state::State};
+
+    use super::*;
+
+    pub type Response<B = hyper::Body> = hyper::Response<B>;
+
+    pub fn respond<T: Template>(t: T) -> Response {
+        match t.render() {
+            Ok(body) => Response::builder()
+                .status(StatusCode::OK)
+                .header(
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static(HTML_MIME_TYPE),
+                )
+                .body(body.into())
+                .unwrap(),
+            Err(_) => Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(vec![].into())
+                .unwrap(),
+        }
+    }
+
+    impl<'a> IntoResponse for TemplateFn<'a> {
+        fn into_response(self, _state: &State) -> Response {
+            respond(self)
+        }
+    }
+}
+
+#[doc(hidden)]
+#[cfg(feature = "rocket")]
+pub mod __rocket {
+    use std::io::Cursor;
+
+    use rocket::{
+        http::{Header, Status},
+        response::Response,
+    };
+    pub use rocket::{
+        response::{Responder, Result},
+        Request,
+    };
+
+    use super::*;
+
+    pub fn respond<T: Template>(t: T) -> Result<'static> {
+        let rsp = t.render().map_err(|_| Status::InternalServerError)?;
+        Response::build()
+            .header(Header::new("content-type", HTML_MIME_TYPE))
+            .sized_body(rsp.len(), Cursor::new(rsp))
+            .ok()
+    }
+
+    impl<'a, 'r, 'o: 'r> Responder<'r, 'o> for TemplateFn<'a> {
+        fn respond_to(self, _req: &'r Request<'_>) -> Result<'o> {
+            respond(self)
+        }
     }
 }
