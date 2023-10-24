@@ -1,0 +1,21 @@
+[package]
+name = "russx_macros"
+version = "0.1.0"
+description = "Procedural macros for russx"
+homepage = "https://github.com/PizzasBear/russx"
+repository = "https://github.com/PizzasBear/russx"
+license = "Apache-2.0"
+workspace = ".."
+readme = "README.md"
+edition = "2021"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+askama_escape = "0.3"
+itertools = "0.11"
+proc-macro2 = "1.0"
+quote = "1.0"
+rstml = "0.11"
+syn = { version = "2.0", features = ["full"] }

@@ -1,0 +1,18 @@
+[package]
+name = "russx"
+version = "0.1.0"
+description = "A rust template library"
+documentation = "https://docs.rs/russx"
+keywords = ["markup", "template", "html", "rsx"]
+categories = ["template-engine"]
+homepage = "https://github.com/PizzasBear/russx"
+repository = "https://github.com/PizzasBear/russx"
+license = "Apache-2.0"
+workspace = ".."
+readme = "../README.md"
+edition = "2021"
+
+[dependencies]
+russx_macros = { version = "0.1.0", path = "../russx_macros" }
+typed-builder = "0.18"
+askama_escape = "0.3"
