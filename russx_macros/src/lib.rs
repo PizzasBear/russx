@@ -2245,15 +2245,15 @@ fn parse_templates(input: ParseStream) -> syn::Result<Vec<ItemTmpl>> {
 /// templates! {
 ///     pub fn greet<'a>(name_result: Result<&'a str, &'a str>) {
 ///         <match {name_result}>
-///         <on case(Ok("President John"))
+///         <on case(Ok("President John"))>
 ///             "Oh, hello John, how are you?"
-///         <on case(Ok(name))
+///         <on case(Ok(name))>
 ///             "Hello" {name}
 ///         <on case(Err(reason)) if {reason == "laziness"}>
 ///             "YOU ARE FIRED!"
 ///         <on case(Err("sleepiness"))>
 ///             "WAKE UP!"
-///         <on case(Err(reason))
+///         <on case(Err(reason))>
 ///             "Getting name failed because" {reason}
 ///         </match>
 ///     }
@@ -2343,7 +2343,7 @@ fn parse_templates(input: ParseStream) -> syn::Result<Vec<ItemTmpl>> {
 ///             <body>
 ///                 <{children} />
 ///             <body/>
-///         </html
+///         </html>
 ///     }
 ///
 ///     pub fn home_page() {
