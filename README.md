@@ -1,5 +1,8 @@
 # russx
 
+[![Documentation](https://docs.rs/russx/badge.svg)](https://docs.rs/russx/)
+[![Latest version](https://img.shields.io/crates/v/russx.svg)](https://crates.io/crates/russx)
+
 Russx implements a template rendering engine based on [rstml](https://github.com/rs-tml/rstml).
 It generates Rust code from your templates at compile time using a macro.
 This crate is inpired by both [Askama](https://github.com/djc/askama) and [Leptos](https://github.com/leptos-rs/leptos).
