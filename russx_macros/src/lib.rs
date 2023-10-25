@@ -2203,9 +2203,10 @@ impl ToTokens for ItemTmpl {
                 #into_where_clause
                 {
                     fn into(self) -> #crate_path::TemplateFn<'__self> {
-                        #crate_path::TemplateFn::new(self.size_hint(), |writer| {
-                            #crate_path::Template::render_into(self, writer)
-                        })
+                        #crate_path::TemplateFn::new(
+                            #crate_path::Template::size_hint(&self),
+                            |writer| #crate_path::Template::render_into(self, writer),
+                        )
                     }
                 }
 
