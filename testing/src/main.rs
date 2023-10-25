@@ -1,5 +1,3 @@
-use russx::Template;
-
 russx::templates! {
     /// info
     pub fn greet<'a>(
@@ -76,6 +74,8 @@ russx::templates! {
 }
 
 fn main() {
+    use russx::Template;
+
     let html = greet2(&["George", "Michael"]).render().unwrap();
     println!("{html}");
 }
