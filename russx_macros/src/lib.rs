@@ -13,7 +13,7 @@ use rstml::node::{
 use syn::{
     braced, parenthesized,
     parse::{Parse, ParseStream},
-    parse_macro_input, parse_quote, parse_quote_spanned,
+    parse_macro_input, parse_quote_spanned,
     punctuated::Punctuated,
     spanned::Spanned,
     token, Token,
@@ -217,18 +217,12 @@ fn parse_node(node: RstmlNode) -> syn::Result<Node> {
                 .collect::<syn::Result<_>>()?,
             close_tag: fragment.tag_close,
         })),
-        RstmlNode::Element(node) if is_name_ident(node.name(), "else") => {
-            return Err(syn::Error::new_spanned(
-                node,
-                "unexpected `<else ...>` node",
-            ));
-        }
-        RstmlNode::Element(node) if is_name_ident(node.name(), "prop") => {
-            return Err(syn::Error::new_spanned(
-                node,
-                "unexpected `<prop ...></_>` node",
-            ));
-        }
+        RstmlNode::Element(node) if is_name_ident(node.name(), "else") => Err(
+            syn::Error::new_spanned(node, "unexpected `<else ...>` node"),
+        ),
+        RstmlNode::Element(node) if is_name_ident(node.name(), "prop") => Err(
+            syn::Error::new_spanned(node, "unexpected `<prop ...></_>` node"),
+        ),
         RstmlNode::Element(rstml::node::NodeElement {
             open_tag:
                 rstml::node::atoms::OpenTag {
@@ -1027,7 +1021,7 @@ fn parse_node(node: RstmlNode) -> syn::Result<Node> {
                         .into_iter()
                         .map(|attr| match attr {
                             NodeAttribute::Block(block) => {
-                                return Err(syn::Error::new_spanned(block, "unexpected block attr"))
+                                Err(syn::Error::new_spanned(block, "unexpected block attr"))
                             }
                             NodeAttribute::Attribute(attr) => {
                                 Ok(StaticTmplNodeAttribute {
@@ -1110,7 +1104,7 @@ impl Parse for NodeBody {
                     )
                     .element_close_use_default_wildcard_ident(false),
             )
-            .parse_syn_stream(&input)
+            .parse_syn_stream(input)
             .into_result()?;
 
             Ok(Self(
@@ -1471,7 +1465,7 @@ fn can_macro_break(mac: &syn::Macro) -> bool {
                 ident == s && {
                     mac.parse_body_with(Punctuated::<syn::Expr, Token![,]>::parse_terminated)
                         .ok()
-                        .map_or(true, |exprs| exprs.iter().any(|expr| can_expr_break(expr)))
+                        .map_or(true, |exprs| exprs.iter().any(can_expr_break))
                 }
             })
     })
@@ -1554,17 +1548,14 @@ fn can_expr_break(expr: &syn::Expr) -> bool {
         syn::Expr::Path(expr) => can_attrs_break(&expr.attrs),
         syn::Expr::Range(expr) => {
             can_attrs_break(&expr.attrs)
-                || expr
-                    .start
-                    .as_ref()
-                    .is_some_and(|expr| can_expr_break(&expr))
-                || expr.end.as_ref().is_some_and(|expr| can_expr_break(&expr))
+                || expr.start.as_ref().is_some_and(|expr| can_expr_break(expr))
+                || expr.end.as_ref().is_some_and(|expr| can_expr_break(expr))
         }
         syn::Expr::Reference(expr) => can_attrs_break(&expr.attrs) || can_expr_break(&expr.expr),
         syn::Expr::Repeat(expr) => can_attrs_break(&expr.attrs) || can_expr_break(&expr.expr),
         syn::Expr::Return(expr) => {
             can_attrs_break(&expr.attrs)
-                || expr.expr.as_ref().is_some_and(|expr| can_expr_break(&expr))
+                || expr.expr.as_ref().is_some_and(|expr| can_expr_break(expr))
         }
         syn::Expr::Struct(expr) => {
             can_attrs_break(&expr.attrs)
@@ -1581,7 +1572,7 @@ fn can_expr_break(expr: &syn::Expr) -> bool {
         syn::Expr::While(expr) => can_attrs_break(&expr.attrs) || can_expr_break(&expr.cond),
         syn::Expr::Yield(expr) => {
             can_attrs_break(&expr.attrs)
-                || expr.expr.as_ref().is_some_and(|expr| can_expr_break(&expr))
+                || expr.expr.as_ref().is_some_and(|expr| can_expr_break(expr))
         }
         _ => true,
     }
@@ -1701,7 +1692,7 @@ impl<'a> TmplBodyNode<'a> {
             }
         }
 
-        write!(EscapeWriter(&mut self.buf), "{value}").unwrap();
+        write!(EscapeWriter(self.buf), "{value}").unwrap();
     }
 
     #[inline]
@@ -2384,7 +2375,6 @@ impl ItemTmpl {
         let into_generics = syn::Generics {
             lt_token: generics
                 .lt_token
-                .clone()
                 .or_else(|| Some(parse_quote_spanned! { span => < })),
             params: {
                 let params = &generics.params;
@@ -2392,16 +2382,17 @@ impl ItemTmpl {
             },
             gt_token: generics
                 .gt_token
-                .clone()
                 .or_else(|| Some(parse_quote_spanned! { span => > })),
             where_clause: match &generics.where_clause {
                 Some(syn::WhereClause {
                     where_token,
                     predicates,
                 }) => {
-                    parse_quote_spanned! { Span::mixed_site() => #where_token Self: '__self, #predicates }
+                    parse_quote_spanned! { Span::mixed_site() => #where_token self::Props #ty_generics: '__self, #predicates }
                 }
-                None => Some(parse_quote_spanned! { Span::mixed_site() => where Self: '__self }),
+                None => Some(parse_quote_spanned! { Span::mixed_site() =>
+                    where self::Props #ty_generics: '__self
+                }),
             },
         };
         let (impl_into_generics, _, into_where_clause) = into_generics.split_for_impl();
@@ -2444,22 +2435,22 @@ impl ItemTmpl {
 
         #[cfg(feature = "hyper")]
         let hyper_impl = quote_spanned! { span =>
-            impl #impl_generics ::core::convert::Into<#crate_path::__hyper::Response>
-            for self::Props #ty_generics
+            impl #impl_generics ::core::convert::From<self::Props #ty_generics>
+            for #crate_path::__hyper::Response
             #where_clause
             {
-                fn into(self) -> #crate_path::__hyper::Response {
-                    #crate_path::__hyper::respond(self)
+                fn from(slf: self::Props #ty_generics) -> Self {
+                    #crate_path::__hyper::respond(slf)
                 }
             }
 
-            impl #impl_generics ::core::convert::TryInto<#crate_path::__hyper::Body>
-            for self::Props #ty_generics
+            impl #impl_generics ::core::convert::TryFrom<self::Props #ty_generics>
+            for #crate_path::__hyper::Body
             #where_clause
             {
                 type Error = #crate_path::Error;
-                fn try_into(self) -> #crate_path::Result<#crate_path::__hyper::Body> {
-                    #crate_path::Template::render(self)
+                fn try_from(slf: self::Props #ty_generics) -> #crate_path::Result<Self> {
+                    #crate_path::Template::render(slf)
                         .map(::core::convert::Into::into)
                 }
             }
@@ -2484,22 +2475,22 @@ impl ItemTmpl {
 
         #[cfg(feature = "tide")]
         let tide_impl = quote_spanned! { span =>
-            impl #impl_generics ::core::convert::TryInto<#crate_path::__tide::Body>
-            for self::Props #ty_generics
+            impl #impl_generics ::core::convert::TryFrom<self::Props #ty_generics>
+            for #crate_path::__tide::Body
             #where_clause
             {
                 type Error = #crate_path::Error;
-                fn try_into(self) -> #crate_path::Result<#crate_path::__tide::Body> {
-                    #crate_path::__tide::try_into_body(self)
+                fn try_from(slf: self::Props #ty_generics) -> #crate_path::Result<Self> {
+                    #crate_path::__tide::try_into_body(slf)
                 }
             }
 
-            impl #impl_generics ::core::convert::Into<#crate_path::__tide::Response>
-            for self::Props #ty_generics
+            impl #impl_generics ::core::convert::From<self::Props #ty_generics>
+            for #crate_path::__tide::Response
             #where_clause
             {
-                fn into(self) -> #crate_path::__tide::Response {
-                    #crate_path::__tide::into_response(self)
+                fn from(slf: self::Props #ty_generics) -> Self {
+                    #crate_path::__tide::into_response(slf)
                 }
             }
         };
@@ -2631,14 +2622,14 @@ impl ItemTmpl {
                     }
                 }
 
-                impl #impl_into_generics ::core::convert::Into<#crate_path::TemplateFn<'__self>>
-                for self::Props #ty_generics
+                impl #impl_into_generics ::core::convert::From<self::Props #ty_generics>
+                for #crate_path::TemplateFn<'__self>
                 #into_where_clause
                 {
-                    fn into(self) -> #crate_path::TemplateFn<'__self> {
-                        #crate_path::TemplateFn::new(
-                            #crate_path::Template::size_hint(&self),
-                            |writer| #crate_path::Template::render_into(self, writer),
+                    fn from(slf: self::Props #ty_generics) -> Self {
+                        Self::new(
+                            #crate_path::Template::size_hint(&slf),
+                            |writer| #crate_path::Template::render_into(slf, writer),
                         )
                     }
                 }
@@ -3004,7 +2995,7 @@ pub fn tmpl(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let mut size = 0;
     let mut block_tokens = TokenStream::new();
     for child in &body.0 {
-        TmplBodyNode::new(&child, &mut size, &mut buf, Span::call_site())
+        TmplBodyNode::new(child, &mut size, &mut buf, Span::call_site())
             .generate(&mut block_tokens);
     }
     size += buf.len();

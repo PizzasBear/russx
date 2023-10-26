@@ -119,17 +119,17 @@ fn write_attribute(
 }
 
 mod sealed {
-    pub trait AttributeSeal {}
-    pub trait AttributesSeal {}
+    pub trait SealedAttribute {}
+    pub trait SealedAttributes {}
 }
 
 /// The attribute trait, this will write a single attribute.
-pub trait Attribute: sealed::AttributeSeal {
+pub trait Attribute: sealed::SealedAttribute {
     /// Renders the attribute to the given fmt writer, the attribute will have a space prefixed.
     fn render_into(&self, writer: &mut (impl fmt::Write + ?Sized)) -> Result<()>;
 }
 
-impl<T: Attribute> sealed::AttributeSeal for &'_ T {}
+impl<T: Attribute> sealed::SealedAttribute for &'_ T {}
 impl<T: Attribute> Attribute for &'_ T {
     #[inline]
     fn render_into(&self, writer: &mut (impl fmt::Write + ?Sized)) -> Result<()> {
@@ -137,7 +137,7 @@ impl<T: Attribute> Attribute for &'_ T {
     }
 }
 
-impl<T: Attribute> sealed::AttributeSeal for &'_ mut T {}
+impl<T: Attribute> sealed::SealedAttribute for &'_ mut T {}
 impl<T: Attribute> Attribute for &'_ mut T {
     #[inline]
     fn render_into(&self, writer: &mut (impl fmt::Write + ?Sized)) -> Result<()> {
@@ -145,7 +145,7 @@ impl<T: Attribute> Attribute for &'_ mut T {
     }
 }
 
-impl sealed::AttributeSeal for String {}
+impl sealed::SealedAttribute for String {}
 impl Attribute for String {
     fn render_into(&self, writer: &mut (impl fmt::Write + ?Sized)) -> Result<()> {
         writer.write_char(' ')?;
@@ -155,7 +155,7 @@ impl Attribute for String {
     }
 }
 
-impl sealed::AttributeSeal for str {}
+impl sealed::SealedAttribute for str {}
 impl Attribute for str {
     fn render_into(&self, writer: &mut (impl fmt::Write + ?Sized)) -> Result<()> {
         writer.write_char(' ')?;
@@ -165,7 +165,7 @@ impl Attribute for str {
     }
 }
 
-impl<N: fmt::Display, T: fmt::Display> sealed::AttributeSeal for (N, T) {}
+impl<N: fmt::Display, T: fmt::Display> sealed::SealedAttribute for (N, T) {}
 impl<N: fmt::Display, T: fmt::Display> Attribute for (N, T) {
     fn render_into(&self, writer: &mut (impl fmt::Write + ?Sized)) -> Result<()> {
         writer.write_char(' ')?;
@@ -189,19 +189,19 @@ impl<N: fmt::Display, T: fmt::Display> Attribute for (N, T) {
 ///     </div>
 /// }.render()?;
 /// ```
-pub trait Attributes: sealed::AttributesSeal {
+pub trait Attributes: sealed::SealedAttributes {
     /// Renders the attributes to the given fmt writer, the attributes will be separated by spaces
     /// and be prefixed with a space.
     fn render_into(self, writer: &mut (impl fmt::Write + ?Sized)) -> Result<()>;
 }
 
-impl<T: Attribute> sealed::AttributesSeal for T {}
+impl<T: Attribute> sealed::SealedAttributes for T {}
 impl<T: Attribute> Attributes for T {
     fn render_into(self, writer: &mut (impl fmt::Write + ?Sized)) -> Result<()> {
         Attribute::render_into(&self, writer)
     }
 }
-impl<I: Attribute, T: IntoIterator<Item = I>> sealed::AttributesSeal for ops::RangeTo<T> {}
+impl<I: Attribute, T: IntoIterator<Item = I>> sealed::SealedAttributes for ops::RangeTo<T> {}
 impl<I: Attribute, T: IntoIterator<Item = I>> Attributes for ops::RangeTo<T> {
     fn render_into(self, writer: &mut (impl fmt::Write + ?Sized)) -> Result<()> {
         for attr in self.end {
@@ -294,11 +294,13 @@ pub trait Template: Sized {
     }
 }
 
+type DynRenderInto<'a> = dyn FnOnce(&mut dyn fmt::Write) -> Result<()> + Send + 'a;
+
 /// A dynamic template generated from a function.
 /// This is the type of `<prop _ />` and `children` when instantiating a static template.
 pub struct TemplateFn<'a> {
     size_hint: usize,
-    render_into: Box<dyn FnOnce(&mut dyn fmt::Write) -> Result<()> + Send + 'a>,
+    render_into: Box<DynRenderInto<'a>>,
 }
 
 impl<'a> Default for TemplateFn<'a> {
@@ -448,16 +450,16 @@ pub mod __hyper {
         })
     }
 
-    impl<'a> Into<Response> for TemplateFn<'a> {
-        fn into(self) -> Response {
-            respond(self)
+    impl<'a> From<TemplateFn<'a>> for Response {
+        fn from(slf: TemplateFn<'a>) -> Self {
+            respond(slf)
         }
     }
 
-    impl<'a> TryInto<Body> for TemplateFn<'a> {
+    impl<'a> TryFrom<TemplateFn<'a>> for Body {
         type Error = Error;
-        fn try_into(self) -> Result<Body> {
-            self.render().map(Into::into)
+        fn try_from(slf: TemplateFn<'a>) -> Result<Self> {
+            slf.render().map(Into::into)
         }
     }
 }
@@ -522,17 +524,17 @@ pub mod __tide {
         }
     }
 
-    impl<'a> TryInto<Body> for TemplateFn<'a> {
+    impl<'a> TryFrom<TemplateFn<'a>> for Body {
         type Error = Error;
 
-        fn try_into(self) -> Result<Body, Self::Error> {
-            try_into_body(self)
+        fn try_from(slf: TemplateFn<'a>) -> Result<Self, Self::Error> {
+            try_into_body(slf)
         }
     }
 
-    impl<'a> Into<Response> for TemplateFn<'a> {
-        fn into(self) -> Response {
-            into_response(self)
+    impl<'a> From<TemplateFn<'a>> for Response {
+        fn from(slf: TemplateFn<'a>) -> Self {
+            into_response(slf)
         }
     }
 }
