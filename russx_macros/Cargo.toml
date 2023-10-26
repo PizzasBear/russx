@@ -1,6 +1,6 @@
 [package]
 name = "russx_macros"
-version = "0.2.1"
+version = "0.3.0"
 description = "Procedural macros for russx"
 homepage = "https://github.com/PizzasBear/russx"
 repository = "https://github.com/PizzasBear/russx"
@@ -13,7 +13,7 @@ edition = "2021"
 proc-macro = true
 
 [dependencies]
-askama_escape = "0.3"
+askama_escape = "0.10"
 proc-macro2 = "1.0"
 quote = "1.0"
 rstml = "0.11"

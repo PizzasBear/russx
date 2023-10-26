@@ -44,7 +44,13 @@ pub struct NodeAttributeValue {
 }
 
 #[derive(Debug, Clone)]
-pub struct HtmlNodeAttribute {
+pub enum HtmlNodeAttribute {
+    Block(NodeBlock),
+    Keyed(KeyedHtmlNodeAttribute),
+}
+
+#[derive(Debug, Clone)]
+pub struct KeyedHtmlNodeAttribute {
     pub key: HtmlNodeName,
     pub value: Option<NodeAttributeValue>,
 }

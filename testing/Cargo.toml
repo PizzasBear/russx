@@ -4,4 +4,4 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-russx = { path = "../russx" }
+russx = { path = "../russx", features = ["axum"] }

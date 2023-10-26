@@ -5,15 +5,15 @@ use std::{
 };
 
 use askama_escape::Escaper;
-use proc_macro2::TokenStream;
-use quote::{quote, ToTokens, TokenStreamExt};
+use proc_macro2::{Ident, Span, TokenStream};
+use quote::{quote, quote_spanned, ToTokens, TokenStreamExt};
 use rstml::node::{
     KeyedAttribute, KeyedAttributeValue, Node as RstmlNode, NodeAttribute, NodeBlock, NodeName,
 };
 use syn::{
     braced, parenthesized,
     parse::{Parse, ParseStream},
-    parse_macro_input, parse_quote,
+    parse_macro_input, parse_quote, parse_quote_spanned,
     punctuated::Punctuated,
     spanned::Spanned,
     token, Token,
@@ -857,27 +857,32 @@ fn parse_node(node: RstmlNode) -> syn::Result<Node> {
                         .into_iter()
                         .map(|attr| match attr {
                             NodeAttribute::Block(block) => {
-                                return Err(syn::Error::new_spanned(
-                                    block,
-                                    "unexpected block attribute, NOTE: HTML elements' keys cannot be blocks",
-                                ));
+                                Ok(HtmlNodeAttribute::Block(block))
+                                // return Err(syn::Error::new_spanned(
+                                //     block,
+                                //     "unexpected block attribute, NOTE: HTML elements' keys cannot be blocks",
+                                // ));
                             }
-                            NodeAttribute::Attribute(attr) => Ok(HtmlNodeAttribute {
-                                key: node_name_to_html_name(attr.key)?,
-                                value: match attr.possible_value {
-                                    KeyedAttributeValue::None => None,
-                                    KeyedAttributeValue::Binding(binding) => {
-                                        return Err(syn::Error::new_spanned(
-                                            binding,
-                                            "unexpected binding attribute",
-                                        ))
-                                    }
-                                    KeyedAttributeValue::Value(value) => Some(NodeAttributeValue {
-                                        eq_token: value.token_eq,
-                                        value: value.value,
-                                    }),
-                                },
-                            }),
+                            NodeAttribute::Attribute(attr) => {
+                                Ok(HtmlNodeAttribute::Keyed(KeyedHtmlNodeAttribute {
+                                    key: node_name_to_html_name(attr.key)?,
+                                    value: match attr.possible_value {
+                                        KeyedAttributeValue::None => None,
+                                        KeyedAttributeValue::Binding(binding) => {
+                                            return Err(syn::Error::new_spanned(
+                                                binding,
+                                                "unexpected binding attribute",
+                                            ))
+                                        }
+                                        KeyedAttributeValue::Value(value) => {
+                                            Some(NodeAttributeValue {
+                                                eq_token: value.token_eq,
+                                                value: value.value,
+                                            })
+                                        }
+                                    },
+                                }))
+                            }
                         })
                         .collect::<syn::Result<_>>()?,
                     end: open_tag_end,
@@ -1285,7 +1290,221 @@ impl Parse for ItemTmpl {
 
 const EST_EXPR_SIZE: usize = 10;
 
-fn try_stringify_expr(expr: &syn::Expr) -> Option<String> {
+#[rustfmt::skip]
+fn can_attrs_break(attrs: &[syn::Attribute]) -> bool {
+    !attrs.iter().all(|attr| {
+        attr.path().get_ident().is_some_and(|ident| {
+            [
+                // Conditional compilation
+                "cfg", "cfg_attr",
+                // Testing
+                "test", "ignore", "should_panic",
+                // Derive
+                "derive", "automatically_derived",
+                // Macros
+                "macro_export", "macro_use", "proc_macro", "proc_macro_derive",
+                "proc_macro_attribute",
+                // Diagnostics
+                "allow", "warn", "deny", "forbid", "deprecated", "must_use",
+                // ABI, linking, symbols, and FFI
+                "link", "link_name", "link_ordinal", "no_link", "repr", "crate_type",
+                "no_main", "export_name", "link_section", "no_mangle", "used", "crate_name",
+                // Code generation
+                "inline", "cold", "no_builtins", "target_feature", "track_caller",
+                "instruction_set",
+                // Documentation
+                "doc",
+                // Preludes
+                "no_std", "no_implicit_prelude",
+                // Modules
+                "path",
+                // Limits
+                "recursion_limit", "type_length_limit",
+                // Runtime
+                "panic_handler", "global_allocator", "windows_subsystem",
+                // Features
+                "feature",
+                // Type System
+                "non_exhaustive",
+                // Debugger
+                "debugger_visualizer",
+            ]
+            .iter()
+            .any(|s| ident == s)
+        })
+    })
+}
+
+fn can_macro_break(mac: &syn::Macro) -> bool {
+    mac.path.get_ident().is_some_and(|ident| {
+        ["cfg", "stringify", "concat", "include_str", "include_bytes"]
+            .iter()
+            .any(|s| ident == s)
+            || [
+                "todo",
+                "unreachable",
+                "unimplemented",
+                "panic",
+                "assert",
+                "assert_eq",
+                "assert_ne",
+                "debug_assert",
+                "debug_assert_eq",
+                "debug_assert_ne",
+                "dbg",
+                "print",
+                "println",
+                "write",
+                "writeln",
+                "format",
+                "format_args",
+            ]
+            .iter()
+            .any(|s| {
+                ident == s && {
+                    mac.parse_body_with(Punctuated::<syn::Expr, Token![,]>::parse_terminated)
+                        .ok()
+                        .map_or(true, |exprs| exprs.iter().any(|expr| can_expr_break(expr)))
+                }
+            })
+    })
+}
+
+fn can_expr_break(expr: &syn::Expr) -> bool {
+    match expr {
+        syn::Expr::Array(expr) => {
+            can_attrs_break(&expr.attrs) || expr.elems.iter().any(can_expr_break)
+        }
+        syn::Expr::Assign(expr) => {
+            can_attrs_break(&expr.attrs)
+                || can_expr_break(&expr.left)
+                || can_expr_break(&expr.right)
+        }
+        syn::Expr::Async(_) => false,
+        syn::Expr::Await(expr) => can_attrs_break(&expr.attrs) || can_expr_break(&expr.base),
+        syn::Expr::Binary(expr) => {
+            can_attrs_break(&expr.attrs)
+                || can_expr_break(&expr.left)
+                || can_expr_break(&expr.right)
+        }
+        syn::Expr::Block(expr) => can_attrs_break(&expr.attrs) || can_block_break(&expr.block),
+        syn::Expr::Break(expr) => {
+            can_attrs_break(&expr.attrs)
+                || expr.label.is_none()
+                || expr.expr.as_ref().is_some_and(|expr| can_expr_break(expr))
+        }
+        syn::Expr::Call(expr) => {
+            can_attrs_break(&expr.attrs)
+                || can_expr_break(&expr.func)
+                || expr.args.iter().any(can_expr_break)
+        }
+        syn::Expr::Cast(expr) => can_attrs_break(&expr.attrs) || can_expr_break(&expr.expr),
+        syn::Expr::Closure(expr) => can_attrs_break(&expr.attrs),
+        syn::Expr::Const(expr) => can_attrs_break(&expr.attrs) || can_block_break(&expr.block),
+        syn::Expr::Continue(expr) => can_attrs_break(&expr.attrs),
+        syn::Expr::Field(expr) => can_attrs_break(&expr.attrs) || can_expr_break(&expr.base),
+        syn::Expr::ForLoop(expr) => can_attrs_break(&expr.attrs),
+        syn::Expr::Group(expr) => can_attrs_break(&expr.attrs) || can_expr_break(&expr.expr),
+        syn::Expr::If(expr) => {
+            can_attrs_break(&expr.attrs)
+                || can_expr_break(&expr.cond)
+                || can_block_break(&expr.then_branch)
+                || expr
+                    .else_branch
+                    .as_ref()
+                    .is_some_and(|(_, expr)| can_expr_break(expr))
+        }
+        syn::Expr::Index(expr) => {
+            can_attrs_break(&expr.attrs)
+                || can_expr_break(&expr.expr)
+                || can_expr_break(&expr.index)
+        }
+        syn::Expr::Infer(_) => false,
+        syn::Expr::Let(expr) => can_attrs_break(&expr.attrs) || can_expr_break(&expr.expr),
+        syn::Expr::Lit(expr) => can_attrs_break(&expr.attrs),
+        syn::Expr::Loop(expr) => can_attrs_break(&expr.attrs),
+        syn::Expr::Macro(syn::ExprMacro { attrs, mac }) => {
+            can_attrs_break(attrs) || can_macro_break(mac)
+        }
+        syn::Expr::Match(expr) => {
+            can_attrs_break(&expr.attrs)
+                || can_expr_break(&expr.expr)
+                || expr.arms.iter().any(|arm| {
+                    !arm.attrs.is_empty()
+                        || arm
+                            .guard
+                            .as_ref()
+                            .is_some_and(|(_, expr)| can_expr_break(expr))
+                        || can_expr_break(&expr.expr)
+                })
+        }
+        syn::Expr::MethodCall(expr) => {
+            can_attrs_break(&expr.attrs)
+                || can_expr_break(&expr.receiver)
+                || expr.args.iter().any(can_expr_break)
+        }
+        syn::Expr::Paren(expr) => can_attrs_break(&expr.attrs) || can_expr_break(&expr.expr),
+        syn::Expr::Path(expr) => can_attrs_break(&expr.attrs),
+        syn::Expr::Range(expr) => {
+            can_attrs_break(&expr.attrs)
+                || expr
+                    .start
+                    .as_ref()
+                    .is_some_and(|expr| can_expr_break(&expr))
+                || expr.end.as_ref().is_some_and(|expr| can_expr_break(&expr))
+        }
+        syn::Expr::Reference(expr) => can_attrs_break(&expr.attrs) || can_expr_break(&expr.expr),
+        syn::Expr::Repeat(expr) => can_attrs_break(&expr.attrs) || can_expr_break(&expr.expr),
+        syn::Expr::Return(expr) => {
+            can_attrs_break(&expr.attrs)
+                || expr.expr.as_ref().is_some_and(|expr| can_expr_break(&expr))
+        }
+        syn::Expr::Struct(expr) => {
+            can_attrs_break(&expr.attrs)
+                || expr.fields.iter().any(|expr| can_expr_break(&expr.expr))
+        }
+        syn::Expr::Try(expr) => can_attrs_break(&expr.attrs) || can_expr_break(&expr.expr),
+        syn::Expr::TryBlock(expr) => can_attrs_break(&expr.attrs) || can_block_break(&expr.block),
+        syn::Expr::Tuple(expr) => {
+            can_attrs_break(&expr.attrs) || expr.elems.iter().any(can_expr_break)
+        }
+        syn::Expr::Unary(expr) => can_attrs_break(&expr.attrs) || can_expr_break(&expr.expr),
+        syn::Expr::Unsafe(expr) => can_attrs_break(&expr.attrs) || can_block_break(&expr.block),
+        syn::Expr::Verbatim(_) => true,
+        syn::Expr::While(expr) => can_attrs_break(&expr.attrs) || can_expr_break(&expr.cond),
+        syn::Expr::Yield(expr) => {
+            can_attrs_break(&expr.attrs)
+                || expr.expr.as_ref().is_some_and(|expr| can_expr_break(&expr))
+        }
+        _ => true,
+    }
+}
+
+fn can_block_break(block: &syn::Block) -> bool {
+    block.stmts.iter().any(|stmt| match stmt {
+        syn::Stmt::Item(_) => false,
+        syn::Stmt::Local(syn::Local { attrs, init, .. }) => {
+            can_attrs_break(attrs)
+                || init
+                    .as_ref()
+                    .is_some_and(|syn::LocalInit { expr, diverge, .. }| {
+                        can_expr_break(expr)
+                            || diverge
+                                .as_ref()
+                                .is_some_and(|(_, expr)| can_expr_break(expr))
+                    })
+        }
+        syn::Stmt::Macro(syn::StmtMacro { attrs, mac, .. }) => {
+            can_attrs_break(attrs) || can_macro_break(mac)
+        }
+        syn::Stmt::Expr(expr, _) => can_expr_break(expr),
+    })
+}
+
+fn try_stringify_expr(expr: &syn::Expr, can_break: bool) -> Option<String> {
+    if can_break && can_expr_break(expr) {
+        return None;
+    }
     match expr {
         syn::Expr::Lit(syn::ExprLit { attrs, lit }) if attrs.is_empty() => match lit {
             syn::Lit::Str(s) => Some(s.value()),
@@ -1297,16 +1516,22 @@ fn try_stringify_expr(expr: &syn::Expr) -> Option<String> {
             _ => None,
         },
         syn::Expr::Paren(syn::ExprParen { expr, attrs, .. }) if attrs.is_empty() => {
-            try_stringify_expr(expr)
+            try_stringify_expr(expr, false)
         }
-        syn::Expr::Block(syn::ExprBlock { block, attrs, .. }) if attrs.is_empty() => {
-            try_stringify_block(block)
-        }
+        syn::Expr::Block(syn::ExprBlock {
+            block,
+            attrs,
+            label: None,
+            ..
+        }) if attrs.is_empty() => try_stringify_block(block, false),
         _ => None,
     }
 }
 
-fn try_stringify_block(block: &syn::Block) -> Option<String> {
+fn try_stringify_block(block: &syn::Block, can_break: bool) -> Option<String> {
+    if can_break && can_block_break(block) {
+        return None;
+    }
     let Some(syn::Stmt::Expr(expr, None)) = block.stmts.iter().rfind(|stmt| {
         matches!(
             stmt,
@@ -1315,13 +1540,15 @@ fn try_stringify_block(block: &syn::Block) -> Option<String> {
     }) else {
         return None;
     };
-    try_stringify_expr(expr)
+    try_stringify_expr(expr, false)
 }
 
 fn flush_buffer(tokens: &mut TokenStream, buf: &mut String) {
     if !buf.is_empty() {
+        let writer = Ident::new("__writer", Span::mixed_site());
+
         tokens.append_all(quote! {
-            ::core::fmt::Write::write_str(__writer, #buf)?;
+            ::core::fmt::Write::write_str(#writer, #buf)?;
         });
         buf.clear();
     }
@@ -1329,18 +1556,15 @@ fn flush_buffer(tokens: &mut TokenStream, buf: &mut String) {
 
 /// Try to isolate `tokens` from `break`.
 fn isolate_block(tokens: impl ToTokens) -> TokenStream {
-    // might be improved to isolate `return` or `__writer` in the future.
-
-    // // this breaks rust analyzer
-    // quote! {
-    //     match (|| -> ::core::result::Result<_, ::core::fmt::Error> {
-    //         Ok({ #tokens })
-    //     })() {
-    //         Ok(__x) => __x,
-    //         Err(__err) => return Err(__err),
-    //     }
-    // }
-    quote! { loop { break { #tokens } } }
+    quote_spanned! { tokens.span() =>
+        loop {
+            #[allow(unreachable_code)]
+            break {
+                #[warn(unreachable_code)]
+                { #tokens }
+            };
+        }
+    }
 }
 
 struct TmplBodyNode<'a> {
@@ -1380,16 +1604,17 @@ impl<'a> TmplBodyNode<'a> {
         *self.size += EST_EXPR_SIZE;
 
         let displayable = isolate_block(displayable);
+        let writer = Ident::new("__writer", Span::mixed_site());
         tokens.append_all(quote! {
-            #crate_path::write_escaped(
-                __writer,
+            #crate_path::__write_escaped(
+                #writer,
                 &#displayable,
             )?;
         });
     }
 
     fn write_block(&mut self, tokens: &mut TokenStream, block: &syn::Block) {
-        match try_stringify_block(block) {
+        match try_stringify_block(block, true) {
             Some(s) => {
                 tokens.append_all(isolate_block(quote! {
                     #block;
@@ -1404,24 +1629,27 @@ impl<'a> TmplBodyNode<'a> {
                         syn::Stmt::Expr(_, _) | syn::Stmt::Macro(_) | syn::Stmt::Local(_),
                     )
                 }) {
-                    Some(i) => {
+                    Some(i)
+                        if matches!(block.stmts[i], syn::Stmt::Expr(_, None))
+                            && !can_block_break(block) =>
+                    {
                         let (before, after) = block.stmts.split_at(i);
-                        let (stmt, after) = after.split_first().unwrap();
+                        let (expr, after) = after.split_first().unwrap();
 
                         let crate_path = crate_path();
 
                         self.flush_buffer(tokens);
                         *self.size += EST_EXPR_SIZE;
+
+                        let writer = Ident::new("__writer", Span::mixed_site());
                         tokens.append_all(isolate_block(quote! {
                             #(#before)*
-                            #crate_path::write_escaped(__writer, &{#stmt})?;
+                            #crate_path::__write_escaped(#writer, &(#expr))?;
                             #(#after)*
                         }));
                         tokens.append_all(quote! { ; });
                     }
-                    None => {
-                        self.write_displayable(tokens, block);
-                    }
+                    _ => self.write_displayable(tokens, block),
                 }
             }
         }
@@ -1435,7 +1663,7 @@ impl<'a> TmplBodyNode<'a> {
     }
 
     fn write_expr(&mut self, tokens: &mut TokenStream, expr: &syn::Expr) {
-        match try_stringify_expr(expr) {
+        match try_stringify_expr(expr, true) {
             Some(s) => {
                 tokens.append_all(isolate_block(quote! {
                     #expr;
@@ -1517,18 +1745,19 @@ impl<'a> TmplBodyNode<'a> {
             }
             Node::TrustElement(TrustNodeElement { value, .. }) => {
                 fn write_block(value: impl ToTokens) -> TokenStream {
+                    let writer = Ident::new("__writer", Span::mixed_site());
                     quote! {
                         // #[allow(unused_braces)]
                         match #value {
                             __value => {
                                 use ::core::fmt::Write;
-                                ::core::write!(__writer, "{}", __value)?;
+                                ::core::write!(#writer, "{}", __value)?;
                             }
                         }
                     }
                 }
                 match value {
-                    NodeBlock::ValidBlock(value) => match try_stringify_block(value) {
+                    NodeBlock::ValidBlock(value) => match try_stringify_block(value, true) {
                         Some(s) => {
                             tokens.append_all(isolate_block(quote! { #value; }));
                             tokens.append_all(quote! { ; });
@@ -1543,7 +1772,10 @@ impl<'a> TmplBodyNode<'a> {
                                         | syn::Stmt::Local(_),
                                 )
                             }) {
-                                Some(i) => {
+                                Some(i)
+                                    if matches!(value.stmts[i], syn::Stmt::Expr(_, None))
+                                        && !can_block_break(value) =>
+                                {
                                     let (before, after) = value.stmts.split_at(i);
                                     let (stmt, after) = after.split_first().unwrap();
 
@@ -1558,7 +1790,7 @@ impl<'a> TmplBodyNode<'a> {
                                     }));
                                     tokens.append_all(quote! { ; });
                                 }
-                                None => tokens.append_all(write_block(value)),
+                                _ => tokens.append_all(write_block(value)),
                             }
                         }
                     },
@@ -1742,12 +1974,24 @@ impl<'a> TmplBodyNode<'a> {
                 self.write_escaped_str(&el.open_tag.name);
 
                 for attr in &el.open_tag.attributes {
-                    self.buf.push(' ');
-                    self.write_escaped_str(&attr.key);
-                    if let Some(value) = &attr.value {
-                        self.buf.push_str("=\"");
-                        self.write_expr(tokens, &value.value);
-                        self.buf.push('"');
+                    match attr {
+                        HtmlNodeAttribute::Keyed(attr) => {
+                            self.buf.push(' ');
+                            self.write_escaped_str(&attr.key);
+                            if let Some(value) = &attr.value {
+                                self.buf.push_str("=\"");
+                                self.write_expr(tokens, &value.value);
+                                self.buf.push('"');
+                            }
+                        }
+                        HtmlNodeAttribute::Block(block) => {
+                            let crate_path = crate_path();
+                            let writer = Ident::new("__writer", Span::mixed_site());
+                            tokens.append_all(isolate_block(quote! {
+                                #crate_path::Attributes::render_into(#block, #writer)?;
+                            }));
+                            tokens.append_all(quote! { ; });
+                        }
                     }
                 }
 
@@ -1779,14 +2023,15 @@ impl<'a> TmplBodyNode<'a> {
                 let crate_path = crate_path();
 
                 self.flush_buffer(tokens);
-                let name_block = isolate_block(name_block);
-                tokens.append_all(quote! {
+                let writer = Ident::new("__writer", Span::mixed_site());
+                tokens.append_all(isolate_block(quote! {
                     // #[allow(unused_braces)]
                     #crate_path::Template::render_into(
                         #name_block,
-                        __writer,
+                        #writer,
                     )?;
-                });
+                }));
+                tokens.append_all(quote! { ; });
                 self.buf.push(' ');
             }
             Node::StaticTmplElement(StaticTmplNodeElement {
@@ -1816,10 +2061,11 @@ impl<'a> TmplBodyNode<'a> {
                     if block_tokens.is_empty() {
                         None
                     } else {
+                        let writer = Ident::new("__writer", Span::mixed_site());
                         Some(quote! {
-                            .children(#crate_path::TemplateFn::new(#children_size, |__writer| {
+                            .children(#crate_path::TemplateFn::new(#children_size, |#writer| {
                                 #block_tokens
-                                ::core::fmt::Result::Ok(())
+                                #crate_path::Result::Ok(())
                             }))
                         })
                     }
@@ -1849,15 +2095,17 @@ impl<'a> TmplBodyNode<'a> {
                         self.flush_buffer(&mut block_tokens);
                         let prop_size = *self.size - init_size;
 
+                        let writer = Ident::new("__writer", Span::mixed_site());
                         quote! {
-                            #name(#crate_path::TemplateFn::new(#prop_size, |__writer| {
+                            #name(#crate_path::TemplateFn::new(#prop_size, |#writer| {
                                 #block_tokens
-                                ::core::fmt::Result::Ok(())
+                                #crate_path::Result::Ok(())
                             }))
                         }
                     },
                 );
 
+                let writer = Ident::new("__writer", Span::mixed_site());
                 tokens.append_all(quote! {
                     #crate_path::Template::render_into(
                         #name::Props::builder()
@@ -1865,7 +2113,7 @@ impl<'a> TmplBodyNode<'a> {
                             #(.#apply_prop_children)*
                             #apply_children
                             .build(),
-                        __writer,
+                        #writer,
                     )?;
                 });
                 self.buf.push(' ');
@@ -1889,11 +2137,14 @@ impl<'a> TmplBodyNode<'a> {
 impl ToTokens for ItemTmpl {
     fn to_tokens(&self, tokens: &mut TokenStream) {
         let crate_path = crate_path();
+        let slf = Ident::new("self", Span::mixed_site());
+        let writer = Ident::new("__writer", Span::mixed_site());
+        let generator = Ident::new("__generator", Span::mixed_site());
 
         let Self {
             attrs,
             vis,
-            fn_token: _,
+            fn_token,
             ident,
             generics,
             paren_token: _,
@@ -1979,7 +2230,7 @@ impl ToTokens for ItemTmpl {
             |TmplArg {
                  pat: syn::PatIdent { ident, .. },
                  ..
-             }| quote! { self.#ident },
+             }| quote! { #slf.#ident },
         );
 
         let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
@@ -1991,7 +2242,7 @@ impl ToTokens for ItemTmpl {
                 .or_else(|| Some(parse_quote! { < })),
             params: {
                 let params = &generics.params;
-                parse_quote! { '__self, #params }
+                parse_quote_spanned! { Span::mixed_site() => '__self, #params }
             },
             gt_token: generics
                 .gt_token
@@ -2002,9 +2253,9 @@ impl ToTokens for ItemTmpl {
                     where_token,
                     predicates,
                 }) => {
-                    parse_quote! { #where_token Self: '__self, #predicates }
+                    parse_quote_spanned! { Span::mixed_site() => #where_token Self: '__self, #predicates }
                 }
-                None => Some(parse_quote! { where Self: '__self }),
+                None => Some(parse_quote_spanned! { Span::mixed_site() => where Self: '__self }),
             },
         };
         let (impl_into_generics, _, into_where_clause) = into_generics.split_for_impl();
@@ -2014,7 +2265,7 @@ impl ToTokens for ItemTmpl {
 
         #[cfg(feature = "axum")]
         let axum_impl = quote! {
-            impl #impl_generics #crate_path::__axum::IntoResponse for Props #ty_generics
+            impl #impl_generics #crate_path::__axum::IntoResponse for self::Props #ty_generics
             #where_clause
             {
                 fn into_response(self) -> #crate_path::__axum::Response {
@@ -2028,7 +2279,7 @@ impl ToTokens for ItemTmpl {
 
         #[cfg(feature = "actix-web")]
         let actix_web_impl = quote! {
-            impl #impl_generics #crate_path::__actix_web::Responder for Props #ty_generics
+            impl #impl_generics #crate_path::__actix_web::Responder for self::Props #ty_generics
             #where_clause
             {
                 type Body = #crate_path::__actix_web::BoxBody;
@@ -2048,7 +2299,7 @@ impl ToTokens for ItemTmpl {
         #[cfg(feature = "hyper")]
         let hyper_impl = quote! {
             impl #impl_generics ::core::convert::Into<#crate_path::__hyper::Response>
-            for Props #ty_generics
+            for self::Props #ty_generics
             #where_clause
             {
                 fn into(self) -> #crate_path::__hyper::Response {
@@ -2057,11 +2308,11 @@ impl ToTokens for ItemTmpl {
             }
 
             impl #impl_generics ::core::convert::TryInto<#crate_path::__hyper::Body>
-            for Props #ty_generics
+            for self::Props #ty_generics
             #where_clause
             {
-                type Error = ::core::fmt::Error;
-                fn try_into(self) -> Result<#crate_path::__hyper::Body, Self::Error> {
+                type Error = #crate_path::Error;
+                fn try_into(self) -> #crate_path::Result<#crate_path::__hyper::Body> {
                     #crate_path::Template::render(self)
                         .map(::core::convert::Into::into)
                 }
@@ -2073,7 +2324,7 @@ impl ToTokens for ItemTmpl {
 
         #[cfg(feature = "warp")]
         let warp_impl = quote! {
-            impl #impl_generics #crate_path::__warp::Reply for Props #ty_generics
+            impl #impl_generics #crate_path::__warp::Reply for self::Props #ty_generics
             #where_clause
             {
                 fn into_response(self) -> #crate_path::__warp::Response {
@@ -2088,17 +2339,17 @@ impl ToTokens for ItemTmpl {
         #[cfg(feature = "tide")]
         let tide_impl = quote! {
             impl #impl_generics ::core::convert::TryInto<#crate_path::__tide::Body>
-            for Props #ty_generics
+            for self::Props #ty_generics
             #where_clause
             {
-                type Error = ::core::fmt::Error;
-                fn try_into(self) -> Result<#crate_path::__tide::Body, Self::Error> {
+                type Error = #crate_path::Error;
+                fn try_into(self) -> #crate_path::Result<#crate_path::__tide::Body> {
                     #crate_path::__tide::try_into_body(self)
                 }
             }
 
             impl #impl_generics ::core::convert::Into<#crate_path::__tide::Response>
-            for Props #ty_generics
+            for self::Props #ty_generics
             #where_clause
             {
                 fn into(self) -> #crate_path::__tide::Response {
@@ -2112,7 +2363,7 @@ impl ToTokens for ItemTmpl {
 
         #[cfg(feature = "gotham")]
         let gotham_impl = quote! {
-            impl #impl_generics #crate_path::__gotham::IntoResponse for Props #ty_generics
+            impl #impl_generics #crate_path::__gotham::IntoResponse for self::Props #ty_generics
             #where_clause
             {
                 fn into_response(
@@ -2148,7 +2399,7 @@ impl ToTokens for ItemTmpl {
 
             quote! {
                 impl #impl_into_generics #crate_path::__rocket::Responder<'__r, '__o>
-                for Props #ty_generics
+                for self::Props #ty_generics
                 #where_clause
                 {
                     fn respond_to(
@@ -2161,45 +2412,80 @@ impl ToTokens for ItemTmpl {
             }
         };
 
+        let inner_vis = match &vis {
+            syn::Visibility::Inherited => parse_quote! { pub(super) },
+            syn::Visibility::Public(_) => vis.clone(),
+            syn::Visibility::Restricted(syn::VisRestricted {
+                pub_token,
+                paren_token: _,
+                in_token,
+                path,
+            }) => {
+                let in_token =
+                    in_token.unwrap_or_else(|| parse_quote_spanned! { path.span() => in });
+
+                match path.segments.first() {
+                    Some(_) if path.leading_colon.is_some() => vis.clone(),
+                    Some(syn::PathSegment { ident, .. }) if ident == "crate" => vis.clone(),
+                    Some(syn::PathSegment { ident, .. }) if ident == "super" => parse_quote! {
+                        #pub_token(#in_token super::#path)
+                    },
+                    Some(syn::PathSegment { ident, .. }) if ident == "self" => {
+                        let segs = path.segments.iter().skip(1);
+                        parse_quote! {
+                            #pub_token(#in_token super #(::#segs)*)
+                        }
+                    }
+                    Some(_) => parse_quote! {
+                        #pub_token(#in_token super::#path)
+                    },
+                    None => unreachable!(),
+                }
+            }
+        };
+
         tokens.append_all(quote! {
             #(#attrs)*
             #vis mod #ident {
+                #[allow(unused_imports)]
                 use super::*;
+
+                use ::core::{clone::Clone, convert::Into, panic};
 
                 #(#attrs)*
                 #[derive(#crate_path::__typed_builder::TypedBuilder)]
                 #[builder(crate_module_path = #crate_path::__typed_builder)]
                 // #[builder(doc)]
-                pub struct Props #generics #where_clause {
+                #inner_vis struct Props #generics #where_clause {
                     #(#props_fields)*
                 }
 
-                impl #impl_generics #crate_path::Template for Props #ty_generics #where_clause {
+                impl #impl_generics #crate_path::Template for self::Props #ty_generics #where_clause {
                     const SIZE_HINT: usize = #size;
 
                     fn render_into(
-                        self,
-                        writer: &mut dyn ::core::fmt::Write,
-                    ) -> ::core::fmt::Result {
+                        #slf,
+                        #writer: &mut dyn ::core::fmt::Write,
+                    ) -> #crate_path::Result<()> {
                         #[inline]
                         #[doc(hidden)]
                         #[allow(unused_braces)]
-                        fn __generate #generics (
-                            __writer: &mut dyn ::core::fmt::Write,
+                        fn #generator #generics (
+                            #writer: &mut dyn ::core::fmt::Write,
                             #(#generate_inputs,)*
-                        ) -> ::core::fmt::Result
+                        ) -> #crate_path::Result<()>
                         #where_clause
                         {
                             #body_tokens
-                            ::core::fmt::Result::Ok(())
+                            #crate_path::Result::Ok(())
                         }
 
-                        __generate(writer, #(#call_generate_args),*)
+                        #generator(#writer, #(#call_generate_args),*)
                     }
                 }
 
                 impl #impl_into_generics ::core::convert::Into<#crate_path::TemplateFn<'__self>>
-                for Props #ty_generics
+                for self::Props #ty_generics
                 #into_where_clause
                 {
                     fn into(self) -> #crate_path::TemplateFn<'__self> {
@@ -2219,7 +2505,7 @@ impl ToTokens for ItemTmpl {
                 #rocket_impl
             }
             #(#attrs)*
-            #vis fn #ident #generics (#(#fn_inputs),*) -> #ident::Props #ty_generics #where_clause {
+            #vis #fn_token #ident #generics (#(#fn_inputs),*) -> #ident::Props #ty_generics #where_clause {
                 #ident::Props {
                     #(#instance_fields,)*
                 }
@@ -2284,9 +2570,13 @@ fn parse_templates(input: ParseStream) -> syn::Result<Vec<ItemTmpl>> {
 /// will optimize any literal attributes. Attribute names may also be prefixed with `raw:` and
 /// follow the same rules as the element name.
 ///
+/// If you want to have dynamic attributes you can surround your attributes with braces.
+/// Then it will call [`Attributes::render_into`] to write your attributes. If you want to iterate over
+/// multiple attributes just use the "range to" operator, `..iter`.
+///
 /// Any close tag may be substituted for an underscore, `_`, and it will be automatically replaced
-/// with the appropriate closing tag. Also some HTML elements such as `<input>` may be self closing
-/// this library respects their descision and identity and will treat them as they desire.
+/// with the appropriate closing tag. Also some HTML elements such as `<input>` may identify as
+/// self closing, this library respects their descision and will treat them as they desire.
 ///
 /// ```rust
 /// templates! {
@@ -2296,7 +2586,11 @@ fn parse_templates(input: ParseStream) -> syn::Result<Vec<ItemTmpl>> {
 ///         age: u8,
 ///     ) {
 ///         <label for=id>"Name: "</label>
-///         <input id=id type="string" name="name" value=name>
+///         <input id=id type="text" name="name" value=name>
+///     }
+///
+///     pub fn text_input(attrs: &'a [&'a str, &'a str]) {
+///         <input type="text" {..attrs}>
 ///     }
 /// }
 /// ```
@@ -2311,6 +2605,9 @@ fn parse_templates(input: ParseStream) -> syn::Result<Vec<ItemTmpl>> {
 ///
 /// You can also choose not to show a subsitution using the discard tag (`<_ {...}>`). This tag
 /// allows you to write mutating operations in a nice manner.
+///
+/// Internally subsitution, and any block, are wrapped by `loop { break {...} }`. You can use this
+/// to break early from the block which works nicely with `let-else` statements.
 ///
 /// ```rust
 /// templates! {
@@ -2521,6 +2818,8 @@ fn parse_templates(input: ParseStream) -> syn::Result<Vec<ItemTmpl>> {
 /// ```
 ///
 /// [`TemplateFn`]: struct.TemplateFn.html
+/// [`Attributes`]: trait.Attributes.html
+/// [`Attributes::render_into`]: trait.Attributes.html#tymethod.render_into
 #[proc_macro]
 pub fn templates(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let items = parse_macro_input!(input with parse_templates);
@@ -2557,10 +2856,12 @@ pub fn tmpl(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     size += buf.len();
     flush_buffer(&mut block_tokens, &mut buf);
 
+    let writer = Ident::new("__writer", Span::mixed_site());
+
     quote! {
-        #crate_path::TemplateFn::new(#size, |__writer| {
+        #crate_path::TemplateFn::new(#size, |#writer| {
             #block_tokens
-            ::core::fmt::Result::Ok(())
+            #crate_path::Result::Ok(())
         })
     }
     .into()

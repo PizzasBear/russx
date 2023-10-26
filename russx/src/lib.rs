@@ -6,9 +6,35 @@
 //! To create templates use the [`templates`](macro.templates.html) macro,
 //! or the [`tmpl`](macro.tmpl.html) for dynamic templates.
 
-use std::{fmt, io};
+use std::{error::Error as StdError, fmt, io, ops};
 
 pub use russx_macros::{templates, tmpl};
+
+pub type Result<T, E = Error> = core::result::Result<T, E>;
+
+/// Russx error type.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum Error {
+    /// Formatting error
+    #[error("formatting error: {0}")]
+    Fmt(#[from] fmt::Error),
+    /// HTML attribute name error.
+    /// Fired when an attribute name doesn't conform to the [HTML standard](https://html.spec.whatwg.org/#attributes-2).
+    #[error("attribute doesn't conform to html standard: {0:?}")]
+    AttributeError(String),
+    /// Any other error that might be raised inside a template.
+    /// use `result.map_err(Error::custom)?`
+    #[error("custom error: {0}")]
+    Custom(Box<dyn StdError + Send + Sync>),
+}
+
+impl Error {
+    /// A utility function to create `Error::Custom`.
+    pub fn custom(err: impl StdError + Send + Sync + 'static) -> Self {
+        Self::Custom(err.into())
+    }
+}
 
 #[doc(hidden)]
 pub mod __typed_builder {
@@ -17,10 +43,10 @@ pub mod __typed_builder {
 
 #[doc(hidden)]
 /// Writes html-escaped `value` into `writer`.
-pub fn write_escaped(
+pub fn __write_escaped(
     writer: &mut (impl fmt::Write + ?Sized),
-    value: impl fmt::Display,
-) -> fmt::Result {
+    value: &(impl fmt::Display + ?Sized),
+) -> Result<()> {
     use fmt::Write;
 
     pub struct EscapeWriter<'a, W: fmt::Write + ?Sized>(&'a mut W);
@@ -34,10 +60,159 @@ pub fn write_escaped(
         }
     }
 
-    write!(EscapeWriter(writer), "{value}")
+    write!(EscapeWriter(writer), "{value}")?;
+
+    Ok(())
 }
 
-/// Main Template trait.
+/// Write an attribute and check its validity.
+fn write_attribute(
+    writer: &mut (impl fmt::Write + ?Sized),
+    value: &(impl fmt::Display + ?Sized),
+) -> Result<()> {
+    use fmt::Write;
+
+    pub struct AttributeWriter<'a, W: fmt::Write + ?Sized> {
+        has_written: bool,
+        writer: &'a mut W,
+    }
+
+    impl<W: fmt::Write + ?Sized> fmt::Write for AttributeWriter<'_, W> {
+        fn write_str(&mut self, s: &str) -> fmt::Result {
+            #[rustfmt::skip]
+            fn is_invalid_attribute_char(ch: char) -> bool {
+                matches!(
+                    ch,
+                    '\0'..='\x1F' | '\x7F'..='\u{9F}'
+                    | ' ' | '"' | '\'' | '>' | '/' | '='
+                    | '\u{FDD0}'..='\u{FDEF}'
+                    | '\u{0FFFE}' | '\u{0FFFF}' | '\u{01FFFE}' | '\u{01FFFF}' | '\u{2FFFE}'
+                    | '\u{2FFFF}' | '\u{3FFFE}' | '\u{03FFFF}' | '\u{04FFFE}' | '\u{4FFFF}'
+                    | '\u{5FFFE}' | '\u{5FFFF}' | '\u{06FFFE}' | '\u{06FFFF}' | '\u{7FFFE}'
+                    | '\u{7FFFF}' | '\u{8FFFE}' | '\u{08FFFF}' | '\u{09FFFE}' | '\u{9FFFF}'
+                    | '\u{AFFFE}' | '\u{AFFFF}' | '\u{0BFFFE}' | '\u{0BFFFF}' | '\u{CFFFE}'
+                    | '\u{CFFFF}' | '\u{DFFFE}' | '\u{0DFFFF}' | '\u{0EFFFE}' | '\u{EFFFF}'
+                    | '\u{FFFFE}' | '\u{FFFFF}' | '\u{10FFFE}' | '\u{10FFFF}'
+                )
+            }
+
+            self.has_written |= !s.is_empty();
+            if s.contains(is_invalid_attribute_char) {
+                return Err(fmt::Error);
+            }
+            self.writer.write_str(s)
+        }
+    }
+
+    let mut attr_writer = AttributeWriter {
+        has_written: false,
+        writer,
+    };
+
+    write!(attr_writer, "{value}")?;
+
+    if !attr_writer.has_written {
+        return Err(Error::AttributeError(value.to_string()));
+    }
+
+    Ok(())
+}
+
+mod sealed {
+    pub trait AttributeSeal {}
+    pub trait AttributesSeal {}
+}
+
+/// The attribute trait, this will write a single attribute.
+pub trait Attribute: sealed::AttributeSeal {
+    /// Renders the attribute to the given fmt writer, the attribute will have a space prefixed.
+    fn render_into(&self, writer: &mut (impl fmt::Write + ?Sized)) -> Result<()>;
+}
+
+impl<T: Attribute> sealed::AttributeSeal for &'_ T {}
+impl<T: Attribute> Attribute for &'_ T {
+    #[inline]
+    fn render_into(&self, writer: &mut (impl fmt::Write + ?Sized)) -> Result<()> {
+        T::render_into(self, writer)
+    }
+}
+
+impl<T: Attribute> sealed::AttributeSeal for &'_ mut T {}
+impl<T: Attribute> Attribute for &'_ mut T {
+    #[inline]
+    fn render_into(&self, writer: &mut (impl fmt::Write + ?Sized)) -> Result<()> {
+        T::render_into(self, writer)
+    }
+}
+
+impl sealed::AttributeSeal for String {}
+impl Attribute for String {
+    fn render_into(&self, writer: &mut (impl fmt::Write + ?Sized)) -> Result<()> {
+        writer.write_char(' ')?;
+        write_attribute(writer, self)?;
+
+        Ok(())
+    }
+}
+
+impl sealed::AttributeSeal for str {}
+impl Attribute for str {
+    fn render_into(&self, writer: &mut (impl fmt::Write + ?Sized)) -> Result<()> {
+        writer.write_char(' ')?;
+        write_attribute(writer, self)?;
+
+        Ok(())
+    }
+}
+
+impl<N: fmt::Display, T: fmt::Display> sealed::AttributeSeal for (N, T) {}
+impl<N: fmt::Display, T: fmt::Display> Attribute for (N, T) {
+    fn render_into(&self, writer: &mut (impl fmt::Write + ?Sized)) -> Result<()> {
+        writer.write_char(' ')?;
+        write_attribute(writer, &self.0)?;
+        writer.write_str("=\"")?;
+        __write_escaped(writer, &self.1)?;
+        writer.write_char('"')?;
+
+        Ok(())
+    }
+}
+
+/// The attributes trait, this can write a variable amount of attributes.
+/// You can use this within a template using a braced attribute, `{...}`.
+///
+/// ```rust
+/// let style_attr = ("style", "border: 1px solid black");
+/// let html = russx::tmpl! {
+///     <div {style_attr}>
+///         "hello world"
+///     </div>
+/// }.render()?;
+/// ```
+pub trait Attributes: sealed::AttributesSeal {
+    /// Renders the attributes to the given fmt writer, the attributes will be separated by spaces
+    /// and be prefixed with a space.
+    fn render_into(self, writer: &mut (impl fmt::Write + ?Sized)) -> Result<()>;
+}
+
+impl<T: Attribute> sealed::AttributesSeal for T {}
+impl<T: Attribute> Attributes for T {
+    fn render_into(self, writer: &mut (impl fmt::Write + ?Sized)) -> Result<()> {
+        Attribute::render_into(&self, writer)
+    }
+}
+impl<I: Attribute, T: IntoIterator<Item = I>> sealed::AttributesSeal for ops::RangeTo<T> {}
+impl<I: Attribute, T: IntoIterator<Item = I>> Attributes for ops::RangeTo<T> {
+    fn render_into(self, writer: &mut (impl fmt::Write + ?Sized)) -> Result<()> {
+        for attr in self.end {
+            attr.render_into(writer)?;
+        }
+
+        Ok(())
+    }
+}
+
+/// Main template trait.
 /// Implementations can be generated using both the `tmpl` and `templates` macros.
 pub trait Template: Sized {
     /// Provides a rough estimate of the expanded length of the rendered template.
@@ -53,23 +228,20 @@ pub trait Template: Sized {
         Self::SIZE_HINT
     }
 
-    // Required method
-
-    /// Renders the template to the given writer fmt buffer.
-    fn render_into(self, writer: &mut dyn fmt::Write) -> fmt::Result;
-
-    // Provided methods
+    /// Renders the template to the given fmt writer.
+    fn render_into(self, writer: &mut dyn fmt::Write) -> Result<()>;
 
     /// Helper method which allocates a new String and renders into it.
-    fn render(self) -> Result<String, fmt::Error> {
+    fn render(self) -> Result<String> {
         let mut buf = String::new();
         let _ = buf.try_reserve(self.size_hint());
         self.render_into(&mut buf)?;
         Ok(buf)
     }
 
+    /// Renders the template to the given IO writer.
     #[inline]
-    fn write_into(self, writer: &mut dyn io::Write) -> io::Result<()> {
+    fn write_into(self, writer: &mut (impl io::Write + ?Sized)) -> io::Result<()> {
         // Create a shim which translates a Write to a fmt::Write and saves
         // off I/O errors. instead of discarding them
         struct Adapter<'a, T: ?Sized + 'a> {
@@ -102,14 +274,20 @@ pub trait Template: Sized {
         };
         match self.render_into(&mut output) {
             Ok(()) => Ok(()),
-            Err(fmt::Error) => {
+            Err(err) => {
                 // check if the error came from the underlying `Write` or not
                 if output.error.is_err() {
                     output.error
                 } else {
-                    Err(writer
-                        .write_fmt(format_args!("{DisplayError}"))
-                        .unwrap_err())
+                    match err {
+                        Error::Fmt(fmt::Error) => Err(writer
+                            .write_fmt(format_args!("{DisplayError}"))
+                            .unwrap_err()),
+                        Error::AttributeError(_) => {
+                            Err(io::Error::new(io::ErrorKind::InvalidData, err))
+                        }
+                        err => Err(io::Error::new(io::ErrorKind::Other, err)),
+                    }
                 }
             }
         }
@@ -120,7 +298,7 @@ pub trait Template: Sized {
 /// This is the type of `<prop _ />` and `children` when instantiating a static template.
 pub struct TemplateFn<'a> {
     size_hint: usize,
-    render_into: Box<dyn FnOnce(&mut dyn fmt::Write) -> fmt::Result + Send + 'a>,
+    render_into: Box<dyn FnOnce(&mut dyn fmt::Write) -> Result<()> + Send + 'a>,
 }
 
 impl<'a> Default for TemplateFn<'a> {
@@ -136,7 +314,7 @@ impl<'a> TemplateFn<'a> {
     /// function (see `Template::render_into`).
     pub fn new(
         size_hint: usize,
-        render_into: impl FnOnce(&mut dyn fmt::Write) -> fmt::Result + Send + 'a,
+        render_into: impl FnOnce(&mut dyn fmt::Write) -> Result<()> + Send + 'a,
     ) -> Self {
         Self {
             size_hint,
@@ -158,7 +336,7 @@ impl Template for TemplateFn<'_> {
         self.size_hint
     }
 
-    fn render_into(self, writer: &mut dyn fmt::Write) -> fmt::Result {
+    fn render_into(self, writer: &mut dyn fmt::Write) -> Result<()> {
         (self.render_into)(writer)
     }
 }
@@ -175,6 +353,7 @@ impl fmt::Debug for TemplateFn<'_> {
     }
 }
 
+#[allow(dead_code)]
 const HTML_MIME_TYPE: &str = "text/html";
 
 #[doc(hidden)]
@@ -216,28 +395,14 @@ pub mod __actix_web {
 
     use super::*;
 
-    struct ErrorAdapter(fmt::Error);
-
-    impl fmt::Debug for ErrorAdapter {
-        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            fmt::Debug::fmt(&self.0, f)
-        }
-    }
-
-    impl fmt::Display for ErrorAdapter {
-        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            fmt::Display::fmt(&self.0, f)
-        }
-    }
-
-    impl ResponseError for ErrorAdapter {}
+    impl ResponseError for Error {}
 
     pub fn respond_to<T: Template>(t: T) -> HttpResponse {
         match t.render() {
             Ok(body) => HttpResponseBuilder::new(StatusCode::OK)
                 .content_type(HeaderValue::from_static(HTML_MIME_TYPE))
                 .body(body),
-            Err(err) => HttpResponse::from_error(ErrorAdapter(err)),
+            Err(err) => HttpResponse::from_error(err),
         }
     }
 
@@ -263,7 +428,7 @@ pub mod __hyper {
 
     pub type Response<B = Body> = hyper::Response<B>;
 
-    fn try_respond<T: Template>(t: T) -> Result<Response, fmt::Error> {
+    fn try_respond<T: Template>(t: T) -> Result<Response> {
         Ok(Response::builder()
             .status(StatusCode::OK)
             .header(
@@ -290,8 +455,8 @@ pub mod __hyper {
     }
 
     impl<'a> TryInto<Body> for TemplateFn<'a> {
-        type Error = fmt::Error;
-        fn try_into(self) -> Result<Body, Self::Error> {
+        type Error = Error;
+        fn try_into(self) -> Result<Body> {
             self.render().map(Into::into)
         }
     }
@@ -335,7 +500,7 @@ pub mod __tide {
 
     use super::*;
 
-    pub fn try_into_body<T: Template>(t: T) -> Result<Body, fmt::Error> {
+    pub fn try_into_body<T: Template>(t: T) -> Result<Body> {
         let mut body = Body::from_string(t.render()?);
         body.set_mime(HTML_MIME_TYPE);
         Ok(body)
@@ -358,7 +523,7 @@ pub mod __tide {
     }
 
     impl<'a> TryInto<Body> for TemplateFn<'a> {
-        type Error = fmt::Error;
+        type Error = Error;
 
         fn try_into(self) -> Result<Body, Self::Error> {
             try_into_body(self)

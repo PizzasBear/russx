@@ -1,4 +1,4 @@
-russx::templates! {
+::russx::templates! {
     /// info
     pub fn greet<'a>(
         #[prop(default = "Jeff")]
@@ -47,9 +47,9 @@ russx::templates! {
         #[prop(default)]
         title: &'a str,
         #[prop(into, default)]
-        head: russx::TemplateFn<'a>,
+        head: ::russx::TemplateFn<'a>,
         #[prop(into, default)]
-        children: russx::TemplateFn<'a>,
+        children: ::russx::TemplateFn<'a>,
     ) {
         <!DOCTYPE html>
         <html>
@@ -69,13 +69,41 @@ russx::templates! {
                 <greet name="foo" />
             </prop>
             hello {name}
-        </self::base>
+        </_>
+    }
+}
+
+::russx::templates! {
+    fn f<'a, T: ::core::iter::IntoIterator<Item = (&'a str, &'a str)> + ::core::marker::Send>(iter: T) {
+        <input {..iter}>
+    }
+
+    fn g(s: ::std::string::String) {
+        {s}
+        {s}
+    }
+}
+
+mod a {
+    ::russx::templates! {
+        pub(self) fn a() {}
+        pub(super) fn b() {}
+        pub(in crate::a) fn c() {}
+        pub(crate) fn d() {}
     }
 }
 
 fn main() {
-    use russx::Template;
+    use ::russx::Template;
+
+    let s = "hello world".to_string();
+    let dynhtml = ::russx::tmpl! {
+        {println!("s"); s}
+        {s}
+    }
+    .render()
+    .unwrap();
 
     let html = greet2(&["George", "Michael"]).render().unwrap();
-    println!("{html}");
+    ::std::println!("{html}");
 }
