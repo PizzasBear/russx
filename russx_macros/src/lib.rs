@@ -200,8 +200,8 @@ fn is_name_ident(name: &NodeName, ident: &str) -> bool {
 // ) -> fmt::Result {
 // }
 
-fn crate_path() -> syn::Path {
-    syn::parse_quote!(::russx)
+fn crate_path(span: Span) -> syn::Path {
+    syn::parse_quote_spanned!(span => ::russx)
 }
 
 fn parse_node(node: RstmlNode) -> syn::Result<Node> {
@@ -1123,6 +1123,16 @@ impl Parse for NodeBody {
     }
 }
 
+impl ToTokens for NodeBody {
+    fn to_tokens(&self, tokens: &mut TokenStream) {
+        let Self(nodes) = self;
+
+        for node in nodes {
+            node.to_tokens(tokens);
+        }
+    }
+}
+
 #[allow(dead_code)]
 enum TmplPropMeta {
     Into {
@@ -1178,6 +1188,26 @@ impl Parse for TmplPropMeta {
     }
 }
 
+impl ToTokens for TmplPropMeta {
+    fn to_tokens(&self, tokens: &mut TokenStream) {
+        match self {
+            TmplPropMeta::Into { into_token } => into_token.to_tokens(tokens),
+            TmplPropMeta::Default { default_token } => default_token.to_tokens(tokens),
+            TmplPropMeta::DefaultValue {
+                default_token,
+                eq_token,
+                value,
+            } => {
+                default_token.to_tokens(tokens);
+                eq_token.to_tokens(tokens);
+                value.to_tokens(tokens);
+            }
+            TmplPropMeta::Optional { optional_token } => optional_token.to_tokens(tokens),
+            TmplPropMeta::Toggle { toggle_token } => toggle_token.to_tokens(tokens),
+        }
+    }
+}
+
 #[allow(dead_code)]
 struct TmplProp {
     pound_token: Token![#],
@@ -1186,6 +1216,35 @@ struct TmplProp {
     prop_token: kw::prop,
     delimiter: syn::MacroDelimiter,
     meta_inner: Punctuated<TmplPropMeta, Token![,]>,
+}
+
+impl ToTokens for TmplProp {
+    fn to_tokens(&self, tokens: &mut TokenStream) {
+        let Self {
+            pound_token,
+            style,
+            bracket_token,
+            prop_token,
+            delimiter,
+            meta_inner,
+        } = self;
+
+        pound_token.to_tokens(tokens);
+        if let syn::AttrStyle::Inner(tk) = style {
+            tk.to_tokens(tokens);
+        }
+        bracket_token.surround(tokens, |tokens| {
+            prop_token.to_tokens(tokens);
+            let f = |tokens: &mut _| {
+                meta_inner.to_tokens(tokens);
+            };
+            match delimiter {
+                syn::MacroDelimiter::Paren(delim) => delim.surround(tokens, f),
+                syn::MacroDelimiter::Brace(delim) => delim.surround(tokens, f),
+                syn::MacroDelimiter::Bracket(delim) => delim.surround(tokens, f),
+            }
+        })
+    }
 }
 
 struct TmplArg {
@@ -1247,6 +1306,28 @@ impl Parse for TmplArg {
     }
 }
 
+impl ToTokens for TmplArg {
+    fn to_tokens(&self, tokens: &mut TokenStream) {
+        let Self {
+            prop_attrs,
+            attrs,
+            pat,
+            colon_token,
+            ty,
+        } = self;
+
+        for prop in prop_attrs {
+            prop.to_tokens(tokens);
+        }
+        for attr in attrs {
+            attr.to_tokens(tokens);
+        }
+        pat.to_tokens(tokens);
+        colon_token.to_tokens(tokens);
+        ty.to_tokens(tokens);
+    }
+}
+
 #[allow(dead_code)]
 struct ItemTmpl {
     pub attrs: Vec<syn::Attribute>,
@@ -1285,6 +1366,32 @@ impl Parse for ItemTmpl {
             brace_token: braced!(body_content in input),
             body: body_content.parse()?,
         })
+    }
+}
+
+impl ToTokens for ItemTmpl {
+    fn to_tokens(&self, tokens: &mut TokenStream) {
+        let Self {
+            attrs,
+            vis,
+            fn_token,
+            ident,
+            generics,
+            paren_token,
+            inputs,
+            brace_token,
+            body,
+        } = self;
+
+        for attr in attrs {
+            attr.to_tokens(tokens);
+        }
+        vis.to_tokens(tokens);
+        fn_token.to_tokens(tokens);
+        ident.to_tokens(tokens);
+        generics.to_tokens(tokens);
+        paren_token.surround(tokens, |tokens| inputs.to_tokens(tokens));
+        brace_token.surround(tokens, |tokens| body.to_tokens(tokens));
     }
 }
 
@@ -1543,11 +1650,11 @@ fn try_stringify_block(block: &syn::Block, can_break: bool) -> Option<String> {
     try_stringify_expr(expr, false)
 }
 
-fn flush_buffer(tokens: &mut TokenStream, buf: &mut String) {
+fn flush_buffer(tokens: &mut TokenStream, buf: &mut String, span: Span) {
     if !buf.is_empty() {
         let writer = Ident::new("__writer", Span::mixed_site());
 
-        tokens.append_all(quote! {
+        tokens.append_all(quote_spanned! { span =>
             ::core::fmt::Write::write_str(#writer, #buf)?;
         });
         buf.clear();
@@ -1571,11 +1678,17 @@ struct TmplBodyNode<'a> {
     size: &'a mut usize,
     buf: &'a mut String,
     node: &'a Node,
+    item_span: Span,
 }
 
 impl<'a> TmplBodyNode<'a> {
-    pub fn new(node: &'a Node, size: &'a mut usize, buf: &'a mut String) -> Self {
-        Self { node, size, buf }
+    pub fn new(node: &'a Node, size: &'a mut usize, buf: &'a mut String, item_span: Span) -> Self {
+        Self {
+            node,
+            size,
+            buf,
+            item_span,
+        }
     }
 
     fn write_escaped_str(&mut self, value: impl Display) {
@@ -1594,18 +1707,19 @@ impl<'a> TmplBodyNode<'a> {
     #[inline]
     fn flush_buffer(&mut self, tokens: &mut TokenStream) {
         *self.size += self.buf.len();
-        flush_buffer(tokens, &mut *self.buf)
+        flush_buffer(tokens, &mut *self.buf, self.item_span)
     }
 
     fn write_displayable(&mut self, tokens: &mut TokenStream, displayable: &impl ToTokens) {
-        let crate_path = crate_path();
+        let span = displayable.span();
+        let crate_path = crate_path(span);
 
         self.flush_buffer(tokens);
         *self.size += EST_EXPR_SIZE;
 
         let displayable = isolate_block(displayable);
         let writer = Ident::new("__writer", Span::mixed_site());
-        tokens.append_all(quote! {
+        tokens.append_all(quote_spanned! { span =>
             #crate_path::__write_escaped(
                 #writer,
                 &#displayable,
@@ -1616,10 +1730,8 @@ impl<'a> TmplBodyNode<'a> {
     fn write_block(&mut self, tokens: &mut TokenStream, block: &syn::Block) {
         match try_stringify_block(block, true) {
             Some(s) => {
-                tokens.append_all(isolate_block(quote! {
-                    #block;
-                }));
-                tokens.append_all(quote! { ; });
+                tokens.append_all(isolate_block(block));
+                tokens.append_all(quote_spanned! { block.span() => ; });
                 self.write_escaped_str(&s);
             }
             None => {
@@ -1636,18 +1748,19 @@ impl<'a> TmplBodyNode<'a> {
                         let (before, after) = block.stmts.split_at(i);
                         let (expr, after) = after.split_first().unwrap();
 
-                        let crate_path = crate_path();
+                        let block_span = block.span();
+                        let crate_path = crate_path(block_span);
 
                         self.flush_buffer(tokens);
                         *self.size += EST_EXPR_SIZE;
 
                         let writer = Ident::new("__writer", Span::mixed_site());
-                        tokens.append_all(isolate_block(quote! {
+                        // if macros lie, this can break...
+                        tokens.append_all(quote_spanned! { block_span => {
                             #(#before)*
                             #crate_path::__write_escaped(#writer, &(#expr))?;
                             #(#after)*
-                        }));
-                        tokens.append_all(quote! { ; });
+                        } });
                     }
                     _ => self.write_displayable(tokens, block),
                 }
@@ -1665,10 +1778,8 @@ impl<'a> TmplBodyNode<'a> {
     fn write_expr(&mut self, tokens: &mut TokenStream, expr: &syn::Expr) {
         match try_stringify_expr(expr, true) {
             Some(s) => {
-                tokens.append_all(isolate_block(quote! {
-                    #expr;
-                }));
-                tokens.append_all(quote! { ; });
+                tokens.append_all(isolate_block(expr));
+                tokens.append_all(quote_spanned! { expr.span() => ; });
                 self.write_escaped_str(&s);
             }
             None => self.write_displayable(tokens, expr),
@@ -1734,19 +1845,20 @@ impl<'a> TmplBodyNode<'a> {
             Node::Fragment(fragment) => {
                 let mut block_tokens = TokenStream::new();
                 for child in &fragment.children {
-                    TmplBodyNode::new(child, &mut *self.size, &mut *self.buf)
+                    TmplBodyNode::new(child, &mut *self.size, &mut *self.buf, self.item_span)
                         .generate(&mut block_tokens);
                 }
-                tokens.append_all(quote! { { #block_tokens } });
+                tokens.append_all(quote_spanned! { block_tokens.span() => { #block_tokens } });
             }
             Node::DiscardElement(DiscardNodeElement { value, .. }) => {
-                tokens.append_all(isolate_block(quote! { #value; }));
-                tokens.append_all(quote! { ; });
+                tokens.append_all(isolate_block(value));
+                tokens.append_all(quote_spanned! { self.node.span() => ; });
             }
             Node::TrustElement(TrustNodeElement { value, .. }) => {
                 fn write_block(value: impl ToTokens) -> TokenStream {
                     let writer = Ident::new("__writer", Span::mixed_site());
-                    quote! {
+
+                    quote_spanned! { value.span() =>
                         // #[allow(unused_braces)]
                         match #value {
                             __value => {
@@ -1759,8 +1871,8 @@ impl<'a> TmplBodyNode<'a> {
                 match value {
                     NodeBlock::ValidBlock(value) => match try_stringify_block(value, true) {
                         Some(s) => {
-                            tokens.append_all(isolate_block(quote! { #value; }));
-                            tokens.append_all(quote! { ; });
+                            tokens.append_all(isolate_block(value));
+                            tokens.append_all(quote_spanned! { value.span() => ; });
                             self.buf.push_str(&s);
                         }
                         None => {
@@ -1782,13 +1894,14 @@ impl<'a> TmplBodyNode<'a> {
                                     self.flush_buffer(tokens);
                                     *self.size += EST_EXPR_SIZE;
 
-                                    let show_stmt = write_block(quote! { &{#stmt} });
-                                    tokens.append_all(isolate_block(quote! {
+                                    let show_stmt =
+                                        write_block(quote_spanned! { stmt.span() => &(#stmt) });
+                                    // if macros lie, this can break...
+                                    tokens.append_all(quote_spanned! { value.span() => {
                                         #(#before)*
                                         #show_stmt
                                         #(#after)*
-                                    }));
-                                    tokens.append_all(quote! { ; });
+                                    } });
                                 }
                                 _ => tokens.append_all(write_block(value)),
                             }
@@ -1802,8 +1915,8 @@ impl<'a> TmplBodyNode<'a> {
                 binding,
                 value,
                 ..
-            }) => tokens.append_all(quote! {
-                #let_token #binding = #value;
+            }) => tokens.append_all(quote_spanned! {
+                self.node.span() => #let_token #binding = #value;
             }),
             Node::ForElement(ForNodeElement {
                 open_tag:
@@ -1821,7 +1934,7 @@ impl<'a> TmplBodyNode<'a> {
                 let mut block_tokens = TokenStream::new();
                 let init_size = *self.size;
                 for child in children {
-                    TmplBodyNode::new(child, &mut *self.size, &mut *self.buf)
+                    TmplBodyNode::new(child, &mut *self.size, &mut *self.buf, self.item_span)
                         .generate(&mut block_tokens);
                 }
                 self.buf.push(' ');
@@ -1829,7 +1942,7 @@ impl<'a> TmplBodyNode<'a> {
                 *self.size = 6 * *self.size - 5 * init_size;
 
                 let iter = isolate_block(iter);
-                tokens.append_all(quote! {
+                tokens.append_all(quote_spanned! { self.node.span() =>
                     // #[allow(unused_braces)]
                     #for_token #binding #in_token #iter {
                         #block_tokens
@@ -1851,11 +1964,20 @@ impl<'a> TmplBodyNode<'a> {
                 self.flush_buffer(&mut block_tokens);
 
                 let mut max_arm_size = init_size;
-                for (MatchArmTag { binding, guard, .. }, children) in arms {
+                for (
+                    MatchArmTag {
+                        binding,
+                        guard,
+                        on_token,
+                        ..
+                    },
+                    children,
+                ) in arms
+                {
                     let mut subblock_tokens = TokenStream::new();
 
                     for child in children {
-                        TmplBodyNode::new(child, &mut *self.size, &mut *self.buf)
+                        TmplBodyNode::new(child, &mut *self.size, &mut *self.buf, self.item_span)
                             .generate(&mut subblock_tokens);
                     }
                     self.flush_buffer(&mut subblock_tokens);
@@ -1865,7 +1987,7 @@ impl<'a> TmplBodyNode<'a> {
                         quote! { #if_token #cond }
                     });
 
-                    block_tokens.append_all(quote! {
+                    block_tokens.append_all(quote_spanned! { on_token.span() =>
                         #binding #guard => { #subblock_tokens }
                     });
 
@@ -1875,7 +1997,7 @@ impl<'a> TmplBodyNode<'a> {
                 *self.size = max_arm_size;
 
                 let value = isolate_block(value);
-                tokens.append_all(quote! {
+                tokens.append_all(quote_spanned! { match_token.span() =>
                     // #[allow(unused_braces)]
                     #match_token #value {
                         #block_tokens
@@ -1901,19 +2023,19 @@ impl<'a> TmplBodyNode<'a> {
                 let mut block_tokens = TokenStream::new();
                 let init_size = *self.size;
                 for child in if_section {
-                    TmplBodyNode::new(child, &mut *self.size, &mut *self.buf)
+                    TmplBodyNode::new(child, &mut *self.size, &mut *self.buf, self.item_span)
                         .generate(&mut block_tokens);
                 }
 
                 let let_binding = let_binding.as_ref().map(
                     |IfLetBinding {
                          let_token, binding, ..
-                     }| quote! { #let_token #binding = },
+                     }| quote_spanned! { let_token.span() => #let_token #binding = },
                 );
 
                 self.flush_buffer(&mut block_tokens);
                 let value = isolate_block(value);
-                tokens.append_all(quote! {
+                tokens.append_all(quote_spanned! { if_token.span() =>
                     // #[allow(unused_braces)]
                     #if_token #let_binding #value { #block_tokens }
                 });
@@ -1933,19 +2055,19 @@ impl<'a> TmplBodyNode<'a> {
                     *self.size = init_size;
                     let mut block_tokens = TokenStream::new();
                     for child in children {
-                        TmplBodyNode::new(child, &mut *self.size, &mut *self.buf)
+                        TmplBodyNode::new(child, &mut *self.size, &mut *self.buf, self.item_span)
                             .generate(&mut block_tokens);
                     }
 
                     let let_binding = let_binding.as_ref().map(
                         |IfLetBinding {
                              let_token, binding, ..
-                         }| quote! { #let_token #binding = },
+                         }| quote_spanned! { let_token.span() => #let_token #binding = },
                     );
 
                     self.flush_buffer(&mut block_tokens);
                     let value = isolate_block(value);
-                    tokens.append_all(quote! {
+                    tokens.append_all(quote_spanned! { else_token.span() =>
                         #else_token #if_token #let_binding #value { #block_tokens }
                     });
 
@@ -1956,11 +2078,13 @@ impl<'a> TmplBodyNode<'a> {
                     *self.size = init_size;
                     let mut block_tokens = TokenStream::new();
                     for child in children {
-                        TmplBodyNode::new(child, &mut *self.size, &mut *self.buf)
+                        TmplBodyNode::new(child, &mut *self.size, &mut *self.buf, self.item_span)
                             .generate(&mut block_tokens);
                     }
                     self.flush_buffer(&mut block_tokens);
-                    tokens.append_all(quote! { #else_token { #block_tokens } });
+                    tokens.append_all(quote_spanned! { else_token.span =>
+                        #else_token { #block_tokens }
+                    });
 
                     new_size = new_size.max(*self.size);
                 }
@@ -1985,12 +2109,13 @@ impl<'a> TmplBodyNode<'a> {
                             }
                         }
                         HtmlNodeAttribute::Block(block) => {
-                            let crate_path = crate_path();
+                            let block_span = block.span();
+                            let crate_path = crate_path(block_span);
                             let writer = Ident::new("__writer", Span::mixed_site());
-                            tokens.append_all(isolate_block(quote! {
+                            let block = isolate_block(block);
+                            tokens.append_all(quote_spanned! { block_span =>
                                 #crate_path::Attributes::render_into(#block, #writer)?;
-                            }));
-                            tokens.append_all(quote! { ; });
+                            });
                         }
                     }
                 }
@@ -2004,11 +2129,11 @@ impl<'a> TmplBodyNode<'a> {
 
                 let mut block_tokens = TokenStream::new();
                 for child in &el.children {
-                    TmplBodyNode::new(child, &mut *self.size, &mut *self.buf)
+                    TmplBodyNode::new(child, &mut *self.size, &mut *self.buf, self.item_span)
                         .generate(&mut block_tokens);
                 }
                 if !block_tokens.is_empty() {
-                    tokens.append_all(quote! { { #block_tokens } });
+                    tokens.append_all(quote_spanned! { block_tokens.span() => { #block_tokens } });
                 }
 
                 if let Some(_close_tag) = &el.close_tag {
@@ -2020,18 +2145,19 @@ impl<'a> TmplBodyNode<'a> {
                 self.buf.push(' ');
             }
             Node::DynTmplElement(DynTmplNodeElement { name_block, .. }) => {
-                let crate_path = crate_path();
+                let block_span = name_block.span();
+                let crate_path = crate_path(block_span);
 
                 self.flush_buffer(tokens);
                 let writer = Ident::new("__writer", Span::mixed_site());
-                tokens.append_all(isolate_block(quote! {
+                let block = isolate_block(name_block);
+                tokens.append_all(quote_spanned! { block_span =>
                     // #[allow(unused_braces)]
                     #crate_path::Template::render_into(
-                        #name_block,
+                        #block,
                         #writer,
                     )?;
-                }));
-                tokens.append_all(quote! { ; });
+                });
                 self.buf.push(' ');
             }
             Node::StaticTmplElement(StaticTmplNodeElement {
@@ -2043,8 +2169,7 @@ impl<'a> TmplBodyNode<'a> {
                 prop_children,
                 close_tag: _,
             }) => {
-                let crate_path = crate_path();
-
+                let self_span = self.node.span();
                 self.flush_buffer(tokens);
 
                 let apply_children = {
@@ -2052,7 +2177,7 @@ impl<'a> TmplBodyNode<'a> {
                     let init_size = *self.size;
                     let mut block_tokens = TokenStream::new();
                     for child in children {
-                        TmplBodyNode::new(child, &mut *self.size, &mut *self.buf)
+                        TmplBodyNode::new(child, &mut *self.size, &mut *self.buf, self.item_span)
                             .generate(&mut block_tokens);
                     }
                     self.flush_buffer(&mut block_tokens);
@@ -2062,7 +2187,9 @@ impl<'a> TmplBodyNode<'a> {
                         None
                     } else {
                         let writer = Ident::new("__writer", Span::mixed_site());
-                        Some(quote! {
+                        let crate_path = crate_path(self_span);
+
+                        Some(quote_spanned! { self_span =>
                             .children(#crate_path::TemplateFn::new(#children_size, |#writer| {
                                 #block_tokens
                                 #crate_path::Result::Ok(())
@@ -2074,29 +2201,37 @@ impl<'a> TmplBodyNode<'a> {
                 let apply_attrs =
                     attributes
                         .iter()
-                        .map(|StaticTmplNodeAttribute { key, value }| {
+                        .map(|attr @ StaticTmplNodeAttribute { key, value }| {
                             let value = value.as_ref().map(|value| isolate_block(&value.value));
-                            quote! { #key(#value) }
+                            quote_spanned! { attr.span() => #key(#value) }
                         });
 
                 let apply_prop_children = prop_children.iter().map(
-                    |PropNodeElement {
+                    |el @ PropNodeElement {
                          open_tag: PropOpenTag { name, .. },
                          children,
                          ..
                      }| {
+                        let el_span = el.span();
+                        let crate_path = crate_path(el_span);
+
                         assert!(self.buf.is_empty());
                         let init_size = *self.size;
                         let mut block_tokens = TokenStream::new();
                         for child in children {
-                            TmplBodyNode::new(child, &mut *self.size, &mut *self.buf)
-                                .generate(&mut block_tokens);
+                            TmplBodyNode::new(
+                                child,
+                                &mut *self.size,
+                                &mut *self.buf,
+                                self.item_span,
+                            )
+                            .generate(&mut block_tokens);
                         }
                         self.flush_buffer(&mut block_tokens);
                         let prop_size = *self.size - init_size;
 
                         let writer = Ident::new("__writer", Span::mixed_site());
-                        quote! {
+                        quote_spanned! { el_span =>
                             #name(#crate_path::TemplateFn::new(#prop_size, |#writer| {
                                 #block_tokens
                                 #crate_path::Result::Ok(())
@@ -2106,7 +2241,8 @@ impl<'a> TmplBodyNode<'a> {
                 );
 
                 let writer = Ident::new("__writer", Span::mixed_site());
-                tokens.append_all(quote! {
+                let crate_path = crate_path(self_span);
+                tokens.append_all(quote_spanned! { self_span =>
                     #crate_path::Template::render_into(
                         #name::Props::builder()
                             #(.#apply_attrs)*
@@ -2134,9 +2270,11 @@ impl<'a> TmplBodyNode<'a> {
     }
 }
 
-impl ToTokens for ItemTmpl {
-    fn to_tokens(&self, tokens: &mut TokenStream) {
-        let crate_path = crate_path();
+impl ItemTmpl {
+    fn generate(&self, tokens: &mut TokenStream) {
+        let span = self.span();
+
+        let crate_path = crate_path(span);
         let slf = Ident::new("self", Span::mixed_site());
         let writer = Ident::new("__writer", Span::mixed_site());
         let generator = Ident::new("__generator", Span::mixed_site());
@@ -2160,10 +2298,10 @@ impl ToTokens for ItemTmpl {
         {
             let mut buf = String::new();
             for node in &body.0 {
-                TmplBodyNode::new(node, &mut size, &mut buf).generate(&mut body_tokens);
+                TmplBodyNode::new(node, &mut size, &mut buf, span).generate(&mut body_tokens);
             }
             size += buf.len();
-            flush_buffer(&mut body_tokens, &mut buf);
+            flush_buffer(&mut body_tokens, &mut buf, span);
         }
 
         let props_fields =
@@ -2174,18 +2312,26 @@ impl ToTokens for ItemTmpl {
                 let ty = &arg.ty;
                 let builders = arg.prop_attrs.iter().flat_map(|attr| &attr.meta_inner).map(
                     |prop| match &prop {
-                        TmplPropMeta::Default { .. } => quote! { #[builder(default)] },
-                        TmplPropMeta::Into { .. } => quote! { #[builder(setter(into))] },
-                        TmplPropMeta::DefaultValue { value, .. } => quote! {
-                            #[builder(default = #value)]
+                        TmplPropMeta::Default { default_token } => quote_spanned! { prop.span() =>
+                            #[builder(#default_token)]
                         },
-                        TmplPropMeta::Optional { .. } => quote! {
+                        TmplPropMeta::Into { into_token } => quote_spanned! { prop.span() =>
+                            #[builder(setter(#into_token))]
+                        },
+                        TmplPropMeta::DefaultValue {
+                            default_token,
+                            eq_token,
+                            value,
+                        } => quote_spanned! { prop.span() => #[builder(#default_token #eq_token #value)] },
+                        TmplPropMeta::Optional { .. } => quote_spanned! { prop.span() =>
                             #[builder(default, setter(strip_option))]
                         },
-                        TmplPropMeta::Toggle { .. } => quote! { #[builder(setter(strip_bool))] },
+                        TmplPropMeta::Toggle { .. } => quote_spanned! { prop.span() =>
+                            #[builder(setter(strip_bool))]
+                        },
                     },
                 );
-                quote! {
+                quote_spanned! { arg.span() =>
                     #(#attrs)*
                     #(#builders)*
                     pub #ident #colon_token #ty,
@@ -2227,10 +2373,10 @@ impl ToTokens for ItemTmpl {
              }| ident,
         );
         let call_generate_args = inputs.iter().map(
-            |TmplArg {
+            |arg @ TmplArg {
                  pat: syn::PatIdent { ident, .. },
                  ..
-             }| quote! { #slf.#ident },
+             }| quote_spanned! { arg.span() => #slf.#ident },
         );
 
         let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
@@ -2239,7 +2385,7 @@ impl ToTokens for ItemTmpl {
             lt_token: generics
                 .lt_token
                 .clone()
-                .or_else(|| Some(parse_quote! { < })),
+                .or_else(|| Some(parse_quote_spanned! { span => < })),
             params: {
                 let params = &generics.params;
                 parse_quote_spanned! { Span::mixed_site() => '__self, #params }
@@ -2247,7 +2393,7 @@ impl ToTokens for ItemTmpl {
             gt_token: generics
                 .gt_token
                 .clone()
-                .or_else(|| Some(parse_quote! { > })),
+                .or_else(|| Some(parse_quote_spanned! { span => > })),
             where_clause: match &generics.where_clause {
                 Some(syn::WhereClause {
                     where_token,
@@ -2264,7 +2410,7 @@ impl ToTokens for ItemTmpl {
         let axum_impl = TokenStream::new();
 
         #[cfg(feature = "axum")]
-        let axum_impl = quote! {
+        let axum_impl = quote_spanned! { span =>
             impl #impl_generics #crate_path::__axum::IntoResponse for self::Props #ty_generics
             #where_clause
             {
@@ -2278,7 +2424,7 @@ impl ToTokens for ItemTmpl {
         let actix_web_impl = TokenStream::new();
 
         #[cfg(feature = "actix-web")]
-        let actix_web_impl = quote! {
+        let actix_web_impl = quote_spanned! { span =>
             impl #impl_generics #crate_path::__actix_web::Responder for self::Props #ty_generics
             #where_clause
             {
@@ -2297,7 +2443,7 @@ impl ToTokens for ItemTmpl {
         let hyper_impl = TokenStream::new();
 
         #[cfg(feature = "hyper")]
-        let hyper_impl = quote! {
+        let hyper_impl = quote_spanned! { span =>
             impl #impl_generics ::core::convert::Into<#crate_path::__hyper::Response>
             for self::Props #ty_generics
             #where_clause
@@ -2323,7 +2469,7 @@ impl ToTokens for ItemTmpl {
         let warp_impl = TokenStream::new();
 
         #[cfg(feature = "warp")]
-        let warp_impl = quote! {
+        let warp_impl = quote_spanned! { span =>
             impl #impl_generics #crate_path::__warp::Reply for self::Props #ty_generics
             #where_clause
             {
@@ -2337,7 +2483,7 @@ impl ToTokens for ItemTmpl {
         let tide_impl = TokenStream::new();
 
         #[cfg(feature = "tide")]
-        let tide_impl = quote! {
+        let tide_impl = quote_spanned! { span =>
             impl #impl_generics ::core::convert::TryInto<#crate_path::__tide::Body>
             for self::Props #ty_generics
             #where_clause
@@ -2362,7 +2508,7 @@ impl ToTokens for ItemTmpl {
         let gotham_impl = TokenStream::new();
 
         #[cfg(feature = "gotham")]
-        let gotham_impl = quote! {
+        let gotham_impl = quote_spanned! { span =>
             impl #impl_generics #crate_path::__gotham::IntoResponse for self::Props #ty_generics
             #where_clause
             {
@@ -2384,20 +2530,20 @@ impl ToTokens for ItemTmpl {
                 lt_token: generics
                     .lt_token
                     .clone()
-                    .or_else(|| Some(parse_quote! { < })),
+                    .or_else(|| Some(parse_quote_spanned! { span => < })),
                 params: {
                     let params = &generics.params;
-                    parse_quote! { '__r, '__o: '__r, #params }
+                    parse_quote_spanned! { span => '__r, '__o: '__r, #params }
                 },
                 gt_token: generics
                     .gt_token
                     .clone()
-                    .or_else(|| Some(parse_quote! { > })),
+                    .or_else(|| Some(parse_quote_spanned! { span => > })),
                 where_clause: None,
             };
             let (impl_into_generics, _, _) = into_generics.split_for_impl();
 
-            quote! {
+            quote_spanned! { span =>
                 impl #impl_into_generics #crate_path::__rocket::Responder<'__r, '__o>
                 for self::Props #ty_generics
                 #where_clause
@@ -2413,7 +2559,7 @@ impl ToTokens for ItemTmpl {
         };
 
         let inner_vis = match &vis {
-            syn::Visibility::Inherited => parse_quote! { pub(super) },
+            syn::Visibility::Inherited => parse_quote_spanned! { fn_token.span() => pub(super) },
             syn::Visibility::Public(_) => vis.clone(),
             syn::Visibility::Restricted(syn::VisRestricted {
                 pub_token,
@@ -2427,16 +2573,16 @@ impl ToTokens for ItemTmpl {
                 match path.segments.first() {
                     Some(_) if path.leading_colon.is_some() => vis.clone(),
                     Some(syn::PathSegment { ident, .. }) if ident == "crate" => vis.clone(),
-                    Some(syn::PathSegment { ident, .. }) if ident == "super" => parse_quote! {
-                        #pub_token(#in_token super::#path)
-                    },
+                    Some(syn::PathSegment { ident, .. }) if ident == "super" => {
+                        parse_quote_spanned! { vis.span() => #pub_token(#in_token super::#path) }
+                    }
                     Some(syn::PathSegment { ident, .. }) if ident == "self" => {
                         let segs = path.segments.iter().skip(1);
-                        parse_quote! {
+                        parse_quote_spanned! { vis.span() =>
                             #pub_token(#in_token super #(::#segs)*)
                         }
                     }
-                    Some(_) => parse_quote! {
+                    Some(_) => parse_quote_spanned! { vis.span() =>
                         #pub_token(#in_token super::#path)
                     },
                     None => unreachable!(),
@@ -2444,13 +2590,14 @@ impl ToTokens for ItemTmpl {
             }
         };
 
-        tokens.append_all(quote! {
+        tokens.append_all(quote_spanned! { span =>
             #(#attrs)*
             #vis mod #ident {
                 #[allow(unused_imports)]
-                use super::*;
-
                 use ::core::{clone::Clone, convert::Into, panic};
+
+                #[allow(unused_imports)]
+                use super::*;
 
                 #(#attrs)*
                 #[derive(#crate_path::__typed_builder::TypedBuilder)]
@@ -2824,7 +2971,13 @@ fn parse_templates(input: ParseStream) -> syn::Result<Vec<ItemTmpl>> {
 pub fn templates(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let items = parse_macro_input!(input with parse_templates);
 
-    quote! { #(#items)* }.into()
+    let mut tokens = TokenStream::new();
+
+    for item in items {
+        item.generate(&mut tokens);
+    }
+
+    tokens.into()
 }
 
 /// Define dynamic templates, basically the content of a template funcation inside [`templates`]
@@ -2844,17 +2997,18 @@ pub fn templates(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
 pub fn tmpl(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let body = parse_macro_input!(input as NodeBody);
 
-    let crate_path = crate_path();
+    let crate_path = crate_path(Span::call_site());
 
     let mut buf = String::new();
 
     let mut size = 0;
     let mut block_tokens = TokenStream::new();
     for child in &body.0 {
-        TmplBodyNode::new(&child, &mut size, &mut buf).generate(&mut block_tokens);
+        TmplBodyNode::new(&child, &mut size, &mut buf, Span::call_site())
+            .generate(&mut block_tokens);
     }
     size += buf.len();
-    flush_buffer(&mut block_tokens, &mut buf);
+    flush_buffer(&mut block_tokens, &mut buf, Span::call_site());
 
     let writer = Ident::new("__writer", Span::mixed_site());
 

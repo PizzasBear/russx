@@ -75,7 +75,12 @@
 
 ::russx::templates! {
     fn f<'a, T: ::core::iter::IntoIterator<Item = (&'a str, &'a str)> + ::core::marker::Send>(iter: T) {
-        <input {..iter}>
+        <input {
+            let Some(x) = iter.into_iter().next() else {
+                break ..vec![];
+            };
+            ..vec![x]
+        }>
     }
 
     fn g(s: ::std::string::String) {
@@ -94,7 +99,7 @@ mod a {
 }
 
 fn main() {
-    use ::russx::Template;
+    use russx::Template;
 
     let s = "hello world".to_string();
     let dynhtml = ::russx::tmpl! {

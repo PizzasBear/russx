@@ -1,6 +1,6 @@
 use std::fmt;
 
-use proc_macro2::{Ident, Punct};
+use proc_macro2::{Ident, Punct, TokenStream};
 use quote::ToTokens;
 use rstml::{
     atoms::{CloseTagStart, FragmentClose, FragmentOpen, OpenTagEnd},
@@ -315,4 +315,495 @@ pub enum Node {
     Block(NodeBlock),
     Text(NodeText),
     RawText(RawText),
+}
+
+impl ToTokens for NodeFragment {
+    fn to_tokens(&self, tokens: &mut TokenStream) {
+        let Self {
+            open_tag,
+            children,
+            close_tag,
+        } = self;
+        open_tag.to_tokens(tokens);
+        for child in children {
+            child.to_tokens(tokens);
+        }
+        close_tag.to_tokens(tokens);
+    }
+}
+
+impl ToTokens for LetNodeElement {
+    fn to_tokens(&self, tokens: &mut TokenStream) {
+        let Self {
+            start,
+            let_token,
+            var_token,
+            binding_paren,
+            binding,
+            value,
+            end,
+        } = self;
+
+        start.to_tokens(tokens);
+        let_token.to_tokens(tokens);
+        var_token.to_tokens(tokens);
+        binding_paren.surround(tokens, |tokens| binding.to_tokens(tokens));
+        value.to_tokens(tokens);
+        end.to_tokens(tokens);
+    }
+}
+
+impl ToTokens for TrustNodeElement {
+    fn to_tokens(&self, tokens: &mut TokenStream) {
+        let Self {
+            start,
+            trust_token,
+            value,
+            end,
+        } = self;
+
+        start.to_tokens(tokens);
+        trust_token.to_tokens(tokens);
+        value.to_tokens(tokens);
+        end.to_tokens(tokens);
+    }
+}
+
+impl ToTokens for DiscardNodeElement {
+    fn to_tokens(&self, tokens: &mut TokenStream) {
+        let Self {
+            start,
+            discard_token,
+            value,
+            end,
+        } = self;
+
+        start.to_tokens(tokens);
+        discard_token.to_tokens(tokens);
+        value.to_tokens(tokens);
+        end.to_tokens(tokens);
+    }
+}
+
+impl ToTokens for KwCloseTag {
+    fn to_tokens(&self, tokens: &mut TokenStream) {
+        let Self { start, name, end } = self;
+        start.to_tokens(tokens);
+        name.to_tokens(tokens);
+        end.to_tokens(tokens);
+    }
+}
+
+impl ToTokens for IfLetBinding {
+    fn to_tokens(&self, tokens: &mut TokenStream) {
+        let Self {
+            let_token,
+            binding_paren,
+            binding,
+        } = self;
+
+        let_token.to_tokens(tokens);
+        binding_paren.surround(tokens, |tokens| binding.to_tokens(tokens));
+    }
+}
+
+impl ToTokens for IfOpenTag {
+    fn to_tokens(&self, tokens: &mut TokenStream) {
+        let Self {
+            start,
+            if_token,
+            let_binding,
+            value,
+            end,
+        } = self;
+
+        start.to_tokens(tokens);
+        if_token.to_tokens(tokens);
+        let_binding.to_tokens(tokens);
+        value.to_tokens(tokens);
+        end.to_tokens(tokens);
+    }
+}
+
+impl ToTokens for ElseIfTag {
+    fn to_tokens(&self, tokens: &mut TokenStream) {
+        let Self {
+            start,
+            else_token,
+            if_token,
+            let_binding,
+            value,
+            end,
+        } = self;
+
+        start.to_tokens(tokens);
+        else_token.to_tokens(tokens);
+        if_token.to_tokens(tokens);
+        let_binding.to_tokens(tokens);
+        value.to_tokens(tokens);
+        end.to_tokens(tokens);
+    }
+}
+
+impl ToTokens for ElseTag {
+    fn to_tokens(&self, tokens: &mut TokenStream) {
+        let Self {
+            start,
+            else_token,
+            end,
+        } = self;
+
+        start.to_tokens(tokens);
+        else_token.to_tokens(tokens);
+        end.to_tokens(tokens);
+    }
+}
+
+impl ToTokens for IfNodeElement {
+    fn to_tokens(&self, tokens: &mut TokenStream) {
+        let Self {
+            open_tag,
+            if_section,
+            else_if_sections,
+            else_section,
+            close_tag,
+        } = self;
+
+        open_tag.to_tokens(tokens);
+        for node in if_section {
+            node.to_tokens(tokens);
+        }
+        for (tag, nodes) in else_if_sections {
+            tag.to_tokens(tokens);
+            for node in nodes {
+                node.to_tokens(tokens);
+            }
+        }
+        if let Some((tag, nodes)) = else_section {
+            tag.to_tokens(tokens);
+            for node in nodes {
+                node.to_tokens(tokens);
+            }
+        }
+        close_tag.to_tokens(tokens);
+    }
+}
+
+impl ToTokens for ForOpenTag {
+    fn to_tokens(&self, tokens: &mut TokenStream) {
+        let Self {
+            start,
+            for_token,
+            each_token,
+            binding_paren,
+            binding,
+            in_token,
+            iter,
+            end,
+        } = self;
+
+        start.to_tokens(tokens);
+        for_token.to_tokens(tokens);
+        each_token.to_tokens(tokens);
+        binding_paren.surround(tokens, |tokens| binding.to_tokens(tokens));
+        in_token.to_tokens(tokens);
+        iter.to_tokens(tokens);
+        end.to_tokens(tokens);
+    }
+}
+
+impl ToTokens for ForNodeElement {
+    fn to_tokens(&self, tokens: &mut TokenStream) {
+        let Self {
+            open_tag,
+            children,
+            close_tag,
+        } = self;
+
+        open_tag.to_tokens(tokens);
+        for child in children {
+            child.to_tokens(tokens);
+        }
+        close_tag.to_tokens(tokens);
+    }
+}
+
+impl ToTokens for MatchOpenTag {
+    fn to_tokens(&self, tokens: &mut TokenStream) {
+        let Self {
+            start,
+            match_token,
+            value,
+            end,
+        } = self;
+
+        start.to_tokens(tokens);
+        match_token.to_tokens(tokens);
+        value.to_tokens(tokens);
+        end.to_tokens(tokens);
+    }
+}
+
+impl ToTokens for MatchArmTag {
+    fn to_tokens(&self, tokens: &mut TokenStream) {
+        let Self {
+            start,
+            on_token,
+            case_token,
+            binding_paren,
+            binding,
+            guard,
+            end,
+        } = self;
+
+        start.to_tokens(tokens);
+        on_token.to_tokens(tokens);
+        case_token.to_tokens(tokens);
+        binding_paren.surround(tokens, |tokens| binding.to_tokens(tokens));
+        if let Some((if_token, value)) = guard {
+            if_token.to_tokens(tokens);
+            value.to_tokens(tokens);
+        }
+        end.to_tokens(tokens);
+    }
+}
+
+impl ToTokens for MatchNodeElement {
+    fn to_tokens(&self, tokens: &mut TokenStream) {
+        let Self {
+            open_tag,
+            arms,
+            close_tag,
+        } = self;
+
+        open_tag.to_tokens(tokens);
+        for (tag, children) in arms {
+            tag.to_tokens(tokens);
+            for child in children {
+                child.to_tokens(tokens)
+            }
+        }
+        close_tag.to_tokens(tokens);
+    }
+}
+
+impl ToTokens for RawHtmlNodeName {
+    fn to_tokens(&self, tokens: &mut TokenStream) {
+        let Self {
+            raw_token,
+            colon_token,
+            punctuated,
+        } = self;
+
+        raw_token.to_tokens(tokens);
+        colon_token.to_tokens(tokens);
+        punctuated.to_tokens(tokens);
+    }
+}
+
+impl ToTokens for HtmlNodeName {
+    fn to_tokens(&self, tokens: &mut TokenStream) {
+        match self {
+            Self::Raw(raw) => raw.to_tokens(tokens),
+            Self::Ident(ident) => ident.to_tokens(tokens),
+            Self::Punctuated(puncts) => puncts.to_tokens(tokens),
+        }
+    }
+}
+
+impl ToTokens for NodeAttributeValue {
+    fn to_tokens(&self, tokens: &mut TokenStream) {
+        let Self { eq_token, value } = self;
+
+        eq_token.to_tokens(tokens);
+        value.to_tokens(tokens);
+    }
+}
+
+impl ToTokens for KeyedHtmlNodeAttribute {
+    fn to_tokens(&self, tokens: &mut TokenStream) {
+        let Self { key, value } = self;
+
+        key.to_tokens(tokens);
+        value.to_tokens(tokens);
+    }
+}
+
+impl ToTokens for HtmlNodeAttribute {
+    fn to_tokens(&self, tokens: &mut TokenStream) {
+        match self {
+            Self::Block(block) => block.to_tokens(tokens),
+            Self::Keyed(keyed) => keyed.to_tokens(tokens),
+        }
+    }
+}
+
+impl ToTokens for HtmlOpenTag {
+    fn to_tokens(&self, tokens: &mut TokenStream) {
+        let Self {
+            start,
+            name,
+            attributes,
+            end,
+        } = self;
+
+        start.to_tokens(tokens);
+        name.to_tokens(tokens);
+        for attr in attributes {
+            attr.to_tokens(tokens);
+        }
+        end.to_tokens(tokens);
+    }
+}
+
+impl ToTokens for HtmlCloseTag {
+    fn to_tokens(&self, tokens: &mut TokenStream) {
+        let Self { start, name, end } = self;
+
+        start.to_tokens(tokens);
+        name.to_tokens(tokens);
+        end.to_tokens(tokens);
+    }
+}
+
+impl ToTokens for HtmlNodeElement {
+    fn to_tokens(&self, tokens: &mut TokenStream) {
+        let Self {
+            open_tag,
+            children,
+            close_tag,
+        } = self;
+
+        open_tag.to_tokens(tokens);
+        for child in children {
+            child.to_tokens(tokens);
+        }
+        close_tag.to_tokens(tokens);
+    }
+}
+
+impl ToTokens for StaticTmplNodeAttribute {
+    fn to_tokens(&self, tokens: &mut TokenStream) {
+        let Self { key, value } = self;
+
+        key.to_tokens(tokens);
+        value.to_tokens(tokens);
+    }
+}
+
+impl ToTokens for StaticTmplOpenTag {
+    fn to_tokens(&self, tokens: &mut TokenStream) {
+        let Self {
+            start,
+            name,
+            attributes,
+            end,
+        } = self;
+        start.to_tokens(tokens);
+        name.to_tokens(tokens);
+        for attr in attributes {
+            attr.to_tokens(tokens);
+        }
+        end.to_tokens(tokens);
+    }
+}
+
+impl ToTokens for PropOpenTag {
+    fn to_tokens(&self, tokens: &mut TokenStream) {
+        let Self {
+            start,
+            prop_token,
+            name,
+            end,
+        } = self;
+
+        start.to_tokens(tokens);
+        prop_token.to_tokens(tokens);
+        name.to_tokens(tokens);
+        end.to_tokens(tokens);
+    }
+}
+
+impl ToTokens for PropNodeElement {
+    fn to_tokens(&self, tokens: &mut TokenStream) {
+        let Self {
+            open_tag,
+            children,
+            close_tag,
+        } = self;
+
+        open_tag.to_tokens(tokens);
+        for child in children {
+            child.to_tokens(tokens);
+        }
+        close_tag.to_tokens(tokens);
+    }
+}
+
+impl ToTokens for StaticTmplCloseTag {
+    fn to_tokens(&self, tokens: &mut TokenStream) {
+        let Self { start, name, end } = self;
+
+        start.to_tokens(tokens);
+        name.to_tokens(tokens);
+        end.to_tokens(tokens);
+    }
+}
+
+impl ToTokens for StaticTmplNodeElement {
+    fn to_tokens(&self, tokens: &mut TokenStream) {
+        let Self {
+            open_tag,
+            prop_children,
+            children,
+            close_tag,
+        } = self;
+
+        open_tag.to_tokens(tokens);
+        for prop in prop_children {
+            prop.to_tokens(tokens);
+        }
+        for child in children {
+            child.to_tokens(tokens);
+        }
+        close_tag.to_tokens(tokens);
+    }
+}
+
+impl ToTokens for DynTmplNodeElement {
+    fn to_tokens(&self, tokens: &mut TokenStream) {
+        let Self {
+            start,
+            name_block,
+            end1,
+            end2,
+        } = self;
+
+        start.to_tokens(tokens);
+        name_block.to_tokens(tokens);
+        end1.to_tokens(tokens);
+        end2.to_tokens(tokens);
+    }
+}
+
+impl ToTokens for Node {
+    fn to_tokens(&self, tokens: &mut TokenStream) {
+        match self {
+            Self::Comment(node) => node.to_tokens(tokens),
+            Self::Doctype(node) => node.to_tokens(tokens),
+            Self::Fragment(node) => node.to_tokens(tokens),
+            Self::LetElement(node) => node.to_tokens(tokens),
+            Self::TrustElement(node) => node.to_tokens(tokens),
+            Self::DiscardElement(node) => node.to_tokens(tokens),
+            Self::IfElement(node) => node.to_tokens(tokens),
+            Self::ForElement(node) => node.to_tokens(tokens),
+            Self::MatchElement(node) => node.to_tokens(tokens),
+            Self::HtmlElement(node) => node.to_tokens(tokens),
+            Self::StaticTmplElement(node) => node.to_tokens(tokens),
+            Self::DynTmplElement(node) => node.to_tokens(tokens),
+            Self::Block(node) => node.to_tokens(tokens),
+            Self::Text(node) => node.to_tokens(tokens),
+            Self::RawText(node) => node.to_tokens(tokens),
+        }
+    }
 }
