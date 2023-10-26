@@ -1773,6 +1773,19 @@ impl<'a> TmplBodyNode<'a> {
                 tokens.append_all(quote_spanned! { expr.span() => ; });
                 self.write_escaped_str(&s);
             }
+            None if !can_expr_break(expr) => {
+                let expr_span = expr.span();
+                let crate_path = crate_path(expr_span);
+
+                self.flush_buffer(tokens);
+                *self.size += EST_EXPR_SIZE;
+
+                let writer = Ident::new("__writer", Span::mixed_site());
+                // if macros lie, this can break...
+                tokens.append_all(quote_spanned! { expr_span =>
+                    #crate_path::__write_escaped(#writer, &(#expr))?;
+                });
+            }
             None => self.write_displayable(tokens, expr),
         }
     }

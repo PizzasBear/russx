@@ -1,6 +1,6 @@
 [package]
 name = "russx_macros"
-version = "0.3.0"
+version = "0.3.1"
 description = "Procedural macros for russx"
 homepage = "https://github.com/PizzasBear/russx"
 repository = "https://github.com/PizzasBear/russx"
