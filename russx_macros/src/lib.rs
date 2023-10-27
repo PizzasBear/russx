@@ -6,7 +6,7 @@ use std::{
 
 use askama_escape::Escaper;
 use proc_macro2::{Ident, Span, TokenStream};
-use quote::{quote, quote_spanned, ToTokens, TokenStreamExt};
+use quote::{format_ident, quote, quote_spanned, ToTokens, TokenStreamExt};
 use rstml::node::{
     KeyedAttribute, KeyedAttributeValue, Node as RstmlNode, NodeAttribute, NodeBlock, NodeName,
 };
@@ -2136,7 +2136,7 @@ impl<'a> TmplBodyNode<'a> {
                 let self_span = self.node.span();
                 self.flush_buffer(tokens);
 
-                let apply_children = {
+                let children_value = {
                     assert!(self.buf.is_empty());
                     let init_size = *self.size;
                     let mut block_tokens = TokenStream::new();
@@ -2154,68 +2154,101 @@ impl<'a> TmplBodyNode<'a> {
                         let crate_path = crate_path(self_span);
 
                         Some(quote_spanned! { self_span =>
-                            .children(#crate_path::TemplateFn::new(#children_size, |#writer| {
+                            #crate_path::TemplateFn::new(#children_size, |#writer| {
                                 #block_tokens
                                 #crate_path::Result::Ok(())
-                            }))
+                            })
                         })
                     }
                 };
 
-                let apply_attrs =
-                    attributes
-                        .iter()
-                        .map(|attr @ StaticTmplNodeAttribute { key, value }| {
-                            let value = value.as_ref().map(|value| isolate_block(&value.value));
-                            quote_spanned! { attr.span() => #key(#value) }
-                        });
-
-                let apply_prop_children = prop_children.iter().map(
-                    |el @ PropNodeElement {
-                         open_tag: PropOpenTag { name, .. },
-                         children,
-                         ..
-                     }| {
-                        let el_span = el.span();
-                        let crate_path = crate_path(el_span);
-
-                        assert!(self.buf.is_empty());
-                        let init_size = *self.size;
-                        let mut block_tokens = TokenStream::new();
-                        for child in children {
-                            TmplBodyNode::new(
-                                child,
-                                &mut *self.size,
-                                &mut *self.buf,
-                                self.item_span,
-                            )
-                            .generate(&mut block_tokens);
+                let attr_values = attributes.iter().map(
+                    |attr @ StaticTmplNodeAttribute { value, .. }| match value {
+                        Some(value) if !can_expr_break(&value.value) => {
+                            value.value.to_token_stream()
                         }
-                        self.flush_buffer(&mut block_tokens);
-                        let prop_size = *self.size - init_size;
-
-                        let writer = Ident::new("__writer", Span::mixed_site());
-                        quote_spanned! { el_span =>
-                            #name(#crate_path::TemplateFn::new(#prop_size, |#writer| {
-                                #block_tokens
-                                #crate_path::Result::Ok(())
-                            }))
-                        }
+                        Some(value) => isolate_block(&value.value),
+                        None => quote_spanned!(attr.span() => ()),
                     },
                 );
 
+                let prop_children_values =
+                    prop_children
+                        .iter()
+                        .map(|el @ PropNodeElement { children, .. }| {
+                            let el_span = el.span();
+                            let crate_path = crate_path(el_span);
+
+                            assert!(self.buf.is_empty());
+                            let init_size = *self.size;
+                            let mut block_tokens = TokenStream::new();
+                            for child in children {
+                                TmplBodyNode::new(
+                                    child,
+                                    &mut *self.size,
+                                    &mut *self.buf,
+                                    self.item_span,
+                                )
+                                .generate(&mut block_tokens);
+                            }
+                            self.flush_buffer(&mut block_tokens);
+                            let prop_size = *self.size - init_size;
+
+                            let writer = Ident::new("__writer", Span::mixed_site());
+                            quote_spanned! { el_span =>
+                                #crate_path::TemplateFn::new(#prop_size, |#writer| {
+                                    #block_tokens
+                                    #crate_path::Result::Ok(())
+                                })
+                            }
+                        });
+
+                let apply_attrs = attributes.iter().enumerate().map(
+                    |(i, attr @ StaticTmplNodeAttribute { key, value })| {
+                        let arg = match value {
+                            Some(_) => Some(format_ident!("__arg{i}", span = Span::mixed_site())),
+                            None => None,
+                        };
+                        quote_spanned! { attr.span() => #key(#arg) }
+                    },
+                );
+                let apply_prop_children = (attributes.len()..).zip(prop_children).map(|(i, el)| {
+                    let name = &el.open_tag.name;
+                    let arg = format_ident!("__arg{i}", span = Span::mixed_site());
+                    quote_spanned! { el.span() => #name(#arg) }
+                });
+                let apply_children = match children_value {
+                    Some(_) => {
+                        let i = attributes.len() + prop_children.len();
+                        let arg = format_ident!("__arg{i}", span = Span::mixed_site());
+                        Some(quote_spanned! { self_span => children(#arg) })
+                    }
+                    None => None,
+                }
+                .into_iter();
+
+                let vars =
+                    (0..attributes.len() + prop_children.len() + children_value.is_some() as usize)
+                        .map(|i| format_ident!("__arg{i}", span = Span::mixed_site()));
+                let children_value = children_value.into_iter();
+
                 let writer = Ident::new("__writer", Span::mixed_site());
                 let crate_path = crate_path(self_span);
-                tokens.append_all(quote_spanned! { self_span =>
+                tokens.append_all(quote_spanned! { self_span => {
+                    let (#(#vars,)*) = (
+                        #(#attr_values,)*
+                        #(#prop_children_values,)*
+                        #(#children_value,)*
+                    );
                     #crate_path::Template::render_into(
                         #name::Props::builder()
                             #(.#apply_attrs)*
                             #(.#apply_prop_children)*
-                            #apply_children
+                            #(.#apply_children)*
                             .build(),
                         #writer,
                     )?;
-                });
+                } });
                 self.buf.push(' ');
             }
             Node::Block(block) => {

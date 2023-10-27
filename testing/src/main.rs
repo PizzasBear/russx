@@ -34,12 +34,10 @@
         </match>
     }
 
-    pub fn greet2<'a>(
-        names: &'a [&'a str],
-    ) {
+    pub fn greet2<'a>(names: &'a [&'a str]) {
         <h1>Greet 2 people</h1>
         <for each(name) in {names}>
-            <greet name=name do_it />
+            <greet name=&format!("{name} Nameful") do_it />
         </for>
     }
 
@@ -62,7 +60,9 @@
             </body>
         </html>
     }
+}
 
+::russx::templates! {
     pub fn index<'a>(name: &'a str) {
         <self::base title="hello">
             <prop head>
