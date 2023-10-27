@@ -1,6 +1,6 @@
 [package]
 name = "russx"
-version = "0.3.1"
+version = "0.3.2"
 description = "A rust template library"
 documentation = "https://docs.rs/russx"
 keywords = ["markup", "template", "html", "rsx"]
@@ -13,7 +13,7 @@ readme = "../README.md"
 edition = "2021"
 
 [dependencies]
-russx_macros = { version = "0.3.1", path = "../russx_macros" }
+russx_macros = { version = "0.3.2", path = "../russx_macros" }
 typed-builder = "0.18"
 askama_escape = "0.10"
 thiserror = "1.0"
