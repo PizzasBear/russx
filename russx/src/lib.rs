@@ -36,6 +36,12 @@ impl Error {
     }
 }
 
+impl From<io::Error> for Error {
+    fn from(err: io::Error) -> Self {
+        Self::custom(err)
+    }
+}
+
 #[doc(hidden)]
 pub mod __typed_builder {
     pub use typed_builder::*;
@@ -129,16 +135,16 @@ pub trait Attribute: sealed::SealedAttribute {
     fn render_into(&self, writer: &mut (impl fmt::Write + ?Sized)) -> Result<()>;
 }
 
-impl<T: Attribute> sealed::SealedAttribute for &'_ T {}
-impl<T: Attribute> Attribute for &'_ T {
+impl<T: Attribute + ?Sized> sealed::SealedAttribute for &'_ T {}
+impl<T: Attribute + ?Sized> Attribute for &'_ T {
     #[inline]
     fn render_into(&self, writer: &mut (impl fmt::Write + ?Sized)) -> Result<()> {
         T::render_into(self, writer)
     }
 }
 
-impl<T: Attribute> sealed::SealedAttribute for &'_ mut T {}
-impl<T: Attribute> Attribute for &'_ mut T {
+impl<T: Attribute + ?Sized> sealed::SealedAttribute for &'_ mut T {}
+impl<T: Attribute + ?Sized> Attribute for &'_ mut T {
     #[inline]
     fn render_into(&self, writer: &mut (impl fmt::Write + ?Sized)) -> Result<()> {
         T::render_into(self, writer)
@@ -147,6 +153,7 @@ impl<T: Attribute> Attribute for &'_ mut T {
 
 impl sealed::SealedAttribute for String {}
 impl Attribute for String {
+    /// Writes a valueless attribute
     fn render_into(&self, writer: &mut (impl fmt::Write + ?Sized)) -> Result<()> {
         writer.write_char(' ')?;
         write_attribute(writer, self)?;
@@ -157,6 +164,7 @@ impl Attribute for String {
 
 impl sealed::SealedAttribute for str {}
 impl Attribute for str {
+    /// Writes a valueless attribute
     fn render_into(&self, writer: &mut (impl fmt::Write + ?Sized)) -> Result<()> {
         writer.write_char(' ')?;
         write_attribute(writer, self)?;
@@ -201,6 +209,16 @@ impl<T: Attribute> Attributes for T {
         Attribute::render_into(&self, writer)
     }
 }
+
+impl sealed::SealedAttributes for () {}
+impl Attributes for () {
+    /// Does nothing
+    #[inline]
+    fn render_into(self, _writer: &mut (impl fmt::Write + ?Sized)) -> Result<()> {
+        Ok(())
+    }
+}
+
 impl<I: Attribute, T: IntoIterator<Item = I>> sealed::SealedAttributes for ops::RangeTo<T> {}
 impl<I: Attribute, T: IntoIterator<Item = I>> Attributes for ops::RangeTo<T> {
     fn render_into(self, writer: &mut (impl fmt::Write + ?Sized)) -> Result<()> {

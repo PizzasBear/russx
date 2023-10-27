@@ -1790,46 +1790,6 @@ impl<'a> TmplBodyNode<'a> {
         }
     }
 
-    // fn write_node_name(&mut self, tokens: &mut TokenStream, name: &NodeName) {
-    //     match name {
-    //         NodeName::Block(block) => self.write_block(tokens, block),
-    //         NodeName::Punctuated(pname) => {
-    //             use rstml::node::NodeNameFragment;
-    //             use syn::punctuated::Pair;
-    //             'raw: {
-    //                 if pname.len() < 2 {
-    //                     break 'raw;
-    //                 }
-
-    //                 let mut pairs = pname.pairs();
-
-    //                 let Some(Pair::Punctuated(NodeNameFragment::Ident(ident), punct)) =
-    //                     pairs.next()
-    //                 else {
-    //                     break 'raw;
-    //                 };
-
-    //                 if ident != "raw" || punct.as_char() != ':' {
-    //                     break 'raw;
-    //                 }
-
-    //                 for pair in pairs {
-    //                     self.write_escaped_str(pair.value());
-    //                     if let Some(&punct) = pair.punct() {
-    //                         self.write_escaped_str(punct);
-    //                     }
-    //                 }
-    //                 return;
-    //             }
-
-    //             self.write_escaped_str(name);
-    //         }
-    //         NodeName::Path(_) => {
-    //             self.write_escaped_str(name);
-    //         }
-    //     }
-    // }
-
     fn generate(&mut self, tokens: &mut TokenStream) {
         match self.node {
             Node::Comment(comment) => {
@@ -2682,10 +2642,13 @@ fn parse_templates(input: ParseStream) -> syn::Result<Vec<ItemTmpl>> {
 ///   implements `Template`.
 /// * Implicit lifetimes aren't supported, as a template item's arguments are used to generate the
 ///   `{name}::Props` struct, and structs don't currently support them.
+/// * `impl trait` arguments aren't currently because Rust doesn't yet support `impl trait` fields
+///   in the generated struct. This may change in the future.
 /// * All of a template item's arguments must be named, you can still destructure using the
 ///   `field_name @ pat` pattern.
 /// * Finally the function body uses a special syntax instead of regular rust code, as is the
 ///   entire point.
+///
 /// Here's an example for how to make a simple template:
 /// ```rust
 /// templates! {
@@ -2740,7 +2703,7 @@ fn parse_templates(input: ParseStream) -> syn::Result<Vec<ItemTmpl>> {
 ///         <input id=id type="text" name="name" value=name>
 ///     }
 ///
-///     pub fn text_input(attrs: &'a [&'a str, &'a str]) {
+///     pub fn text_input<'a>(attrs: &'a [(&'a str, &'a str)]) {
 ///         <input type="text" {..attrs}>
 ///     }
 /// }
@@ -2852,6 +2815,7 @@ fn parse_templates(input: ParseStream) -> syn::Result<Vec<ItemTmpl>> {
 /// They also support guards `<on case(pattern) if {condition}>`.
 ///
 /// ```rust
+/// const FIRE_REASONS: &[&str] = &["laziness", "evilness", "badness", "deadness"];
 /// templates! {
 ///     pub fn greet<'a>(name_result: Result<&'a str, &'a str>) {
 ///         <match {name_result}>
@@ -2859,7 +2823,7 @@ fn parse_templates(input: ParseStream) -> syn::Result<Vec<ItemTmpl>> {
 ///             "Oh, hello John, how are you?"
 ///         <on case(Ok(name))>
 ///             "Hello" {name}
-///         <on case(Err(reason)) if {reason == "laziness"}>
+///         <on case(Err(reason)) if {FIRE_REASONS.contains(&reason)}>
 ///             "YOU ARE FIRED!"
 ///         <on case(Err("sleepiness"))>
 ///             "WAKE UP!"
@@ -2918,6 +2882,9 @@ fn parse_templates(input: ParseStream) -> syn::Result<Vec<ItemTmpl>> {
 /// the `children` property. Because `children` can be empty it's recommended to mark it as
 /// `#[prop(into, default)]` to allow callers to not put any children inside.
 ///
+/// Static instantiation doesn't currently support turbofish syntax, so you have to use type
+/// inference for generics, so be careful.
+///
 /// ```rust
 /// templates! {
 ///     pub fn greet<'a>(
@@ -2952,7 +2919,7 @@ fn parse_templates(input: ParseStream) -> syn::Result<Vec<ItemTmpl>> {
 ///             </head>
 ///             <body>
 ///                 <{children} />
-///             <body/>
+///             </body>
 ///         </html>
 ///     }
 ///
