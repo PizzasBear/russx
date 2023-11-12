@@ -2057,6 +2057,16 @@ impl<'a> TmplBodyNode<'a> {
                 self.buf.push(' ');
             }
             Node::HtmlElement(el) => {
+                if matches!(el.open_tag.name, HtmlNodeName::Ident(_)) {
+                    let open = &el.open_tag.name;
+                    let close = el.close_tag.iter().map(|tag| &tag.name);
+                    tokens.append_all(quote_spanned! { open.span() => {
+                        let #open = ();
+                        #(_ = #close;)*
+                        _ = #open;
+                    } });
+                }
+
                 self.buf.push('<');
 
                 self.write_escaped_str(&el.open_tag.name);
@@ -3018,7 +3028,10 @@ pub fn tmpl(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
 
     quote! {
         #crate_path::TemplateFn::new(#size, |#writer| {
-            #block_tokens
+            #[allow(unused_braces)]
+            {
+                #block_tokens
+            }
             #crate_path::Result::Ok(())
         })
     }

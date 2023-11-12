@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 ::russx::templates! {
     /// info
     pub fn greet<'a>(
