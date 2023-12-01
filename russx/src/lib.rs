@@ -438,7 +438,6 @@ pub mod __actix_web {
 #[doc(hidden)]
 #[cfg(feature = "hyper")]
 pub mod __hyper {
-    pub use hyper::Body;
     use hyper::{
         header::{self, HeaderValue},
         StatusCode,
@@ -446,6 +445,7 @@ pub mod __hyper {
 
     use super::*;
 
+    pub type Body = String;
     pub type Response<B = Body> = hyper::Response<B>;
 
     fn try_respond<T: Template>(t: T) -> Result<Response> {
@@ -463,7 +463,7 @@ pub mod __hyper {
         try_respond(t).unwrap_or_else(|_| {
             Response::builder()
                 .status(StatusCode::INTERNAL_SERVER_ERROR)
-                .body(Body::empty())
+                .body(Default::default())
                 .unwrap()
         })
     }
@@ -474,12 +474,12 @@ pub mod __hyper {
         }
     }
 
-    impl<'a> TryFrom<TemplateFn<'a>> for Body {
-        type Error = Error;
-        fn try_from(slf: TemplateFn<'a>) -> Result<Self> {
-            slf.render().map(Into::into)
-        }
-    }
+    // impl<'a> TryFrom<TemplateFn<'a>> for Body {
+    //     type Error = Error;
+    //     fn try_from(slf: TemplateFn<'a>) -> Result<Self> {
+    //         slf.render().map(Into::into)
+    //     }
+    // }
 }
 
 #[doc(hidden)]

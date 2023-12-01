@@ -2460,16 +2460,16 @@ impl ItemTmpl {
                 }
             }
 
-            impl #impl_generics ::core::convert::TryFrom<self::Props #ty_generics>
-            for #crate_path::__hyper::Body
-            #where_clause
-            {
-                type Error = #crate_path::Error;
-                fn try_from(slf: self::Props #ty_generics) -> #crate_path::Result<Self> {
-                    #crate_path::Template::render(slf)
-                        .map(::core::convert::Into::into)
-                }
-            }
+            // impl #impl_generics ::core::convert::TryFrom<self::Props #ty_generics>
+            // for #crate_path::__hyper::Body
+            // #where_clause
+            // {
+            //     type Error = #crate_path::Error;
+            //     fn try_from(slf: self::Props #ty_generics) -> #crate_path::Result<Self> {
+            //         #crate_path::Template::render(slf)
+            //             .map(::core::convert::Into::into)
+            //     }
+            // }
         };
 
         #[cfg(not(feature = "warp"))]
